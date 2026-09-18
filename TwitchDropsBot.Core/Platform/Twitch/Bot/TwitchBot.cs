@@ -133,6 +133,13 @@ public class TwitchBot : BaseBot<TwitchUser>
 
         thingsToWatch = favouriteCampaigns.Concat(thingsToWatch).ToList();
 
+        if (TwitchSettings.PrioritizeBadges)
+        {
+            thingsToWatch = thingsToWatch.OrderBy(CampaignRewardPriority.GetRewardTier).ToList();
+            Logger.LogInformation(
+                $"Badge priority enabled: {thingsToWatch.Count(c => CampaignRewardPriority.GetRewardTier(c) == CampaignRewardPriority.BadgeTier)} badge campaign(s) moved to the front.");
+        }
+
         TimeBasedDrop? timeBasedDrop = null;
         DropCurrentSession? dropCurrentSession = null;
         DropsRewardGroup? dropCurrentRewardGroup = null;

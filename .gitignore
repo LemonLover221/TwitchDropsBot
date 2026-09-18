@@ -365,3 +365,8 @@ MigrationBackup/
 FodyWeavers.xsd
 publish-local-repository.bat
 /publish-local-repository.sh
+
+# Local deployment data (account tokens/config must never be committed)
+deploy/config/
+
+deploy/.env

@@ -10,5 +10,6 @@ public class TwitchSettings
     public bool MinimizeInTray { get; set; } = true;
     public bool ForceTryWithTags { get; set; } = false;
     public bool OnlyConnectedAccounts { get; set; } = false;
+    public bool PrioritizeBadges { get; set; } = false;
     public string WatchManager { get; set; } = WatchManagerType.WatchRequest;
 }
