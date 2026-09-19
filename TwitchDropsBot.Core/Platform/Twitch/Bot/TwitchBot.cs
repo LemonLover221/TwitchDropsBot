@@ -133,13 +133,6 @@ public class TwitchBot : BaseBot<TwitchUser>
 
         thingsToWatch = favouriteCampaigns.Concat(thingsToWatch).ToList();
 
-        if (TwitchSettings.PrioritizeBadges)
-        {
-            thingsToWatch = thingsToWatch.OrderBy(CampaignRewardPriority.GetRewardTier).ToList();
-            Logger.LogInformation(
-                $"Badge priority enabled: {thingsToWatch.Count(c => CampaignRewardPriority.GetRewardTier(c) == CampaignRewardPriority.BadgeTier)} badge campaign(s) moved to the front.");
-        }
-
         TimeBasedDrop? timeBasedDrop = null;
         DropCurrentSession? dropCurrentSession = null;
         DropsRewardGroup? dropCurrentRewardGroup = null;
@@ -643,6 +636,30 @@ public class TwitchBot : BaseBot<TwitchUser>
                     StringComparer.OrdinalIgnoreCase));
         }
 
+        if (TwitchSettings.PrioritizeBadges)
+        {
+            foreach (var campaign in campaigns)
+            {
+                if (finishedCampaigns.Contains(campaign) || campaign.TimeBasedDrops.Count > 0)
+                    continue;
+
+                var prefetched = await BotUser.TwitchRepository.FetchTimeBasedDropsAsync(campaign.Id);
+                if (prefetched is not null)
+                {
+                    campaign.TimeBasedDrops = prefetched.TimeBasedDrops;
+                    campaign.Game = prefetched.Game;
+                    campaign.Allow = prefetched.Allow;
+                }
+            }
+
+            var ordered = campaigns.OrderBy(CampaignRewardPriority.GetRewardTier).ToList();
+            campaigns.Clear();
+            campaigns.AddRange(ordered);
+
+            Logger.LogInformation(
+                $"Badge priority enabled: {campaigns.Count(c => CampaignRewardPriority.GetRewardTier(c) == CampaignRewardPriority.BadgeTier)} badge campaign(s) moved to the front.");
+        }
+
         foreach (var campaign in campaigns.ToList())
         {
             if (campaign.Game is null)
@@ -662,10 +679,13 @@ public class TwitchBot : BaseBot<TwitchUser>
                 continue;
             }
 
-            var tempDropCampaign = await BotUser.TwitchRepository.FetchTimeBasedDropsAsync(campaign.Id);
-            campaign.TimeBasedDrops = tempDropCampaign.TimeBasedDrops;
-            campaign.Game = tempDropCampaign.Game;
-            campaign.Allow = tempDropCampaign.Allow;
+            if (campaign.TimeBasedDrops.Count == 0)
+            {
+                var tempDropCampaign = await BotUser.TwitchRepository.FetchTimeBasedDropsAsync(campaign.Id);
+                campaign.TimeBasedDrops = tempDropCampaign.TimeBasedDrops;
+                campaign.Game = tempDropCampaign.Game;
+                campaign.Allow = tempDropCampaign.Allow;
+            }
 
             if (campaign.TimeBasedDrops.Count == 0)
             {
