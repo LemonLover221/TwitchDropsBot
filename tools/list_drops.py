@@ -3,6 +3,7 @@ import argparse
 import json
 import pathlib
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -77,6 +78,7 @@ def load_users(config_path):
 def reward_rows(campaign):
     rows = []
     for drop in get_ci(campaign, "timeBasedDrops") or []:
+        self_edge = get_ci(drop, "self") or {}
         for edge in get_ci(drop, "benefitEdges") or []:
             benefit = get_ci(edge, "benefit") or {}
             rows.append(
@@ -85,6 +87,8 @@ def reward_rows(campaign):
                     "benefit": get_ci(benefit, "name"),
                     "type": get_ci(benefit, "distributionType"),
                     "minutes": get_ci(drop, "requiredMinutesWatched"),
+                    "current": get_ci(self_edge, "currentMinutesWatched"),
+                    "claimed": get_ci(self_edge, "isClaimed"),
                 }
             )
     return rows
@@ -97,34 +101,21 @@ def print_rows(rows, indent):
     for r in rows:
         print(
             f"{indent}{str(r['type']):<22} drop={r['drop']!r} "
-            f"benefit={r['benefit']!r} req={r['minutes']}min"
+            f"benefit={r['benefit']!r} req={r['minutes']}min cur={r['current']} claimed={r['claimed']}"
         )
 
 
-def main():
-    parser = argparse.ArgumentParser(description="List active Twitch drop campaigns and their reward types.")
-    parser.add_argument("--config", default="deploy/config/config.json")
-    parser.add_argument("--user", default=None, help="Twitch login to query (default: all enabled)")
-    parser.add_argument("--collection", default=None, help="Path to Twitch.postman_collection.json")
-    parser.add_argument("--json", action="store_true", help="Dump raw dashboard JSON")
-    args = parser.parse_args()
+def fetch_campaign_details(campaign, user, token, hashes):
+    details = gql(
+        "DropCampaignDetails",
+        {"dropID": get_ci(campaign, "id"), "channelLogin": user.get("Id")},
+        token,
+        hashes,
+    )
+    return get_ci(get_ci(details.get("data") or {}, "user") or {}, "dropCampaign") or {}
 
-    root = pathlib.Path(__file__).resolve().parent.parent
-    collection = args.collection or str(root / "TwitchDropsBot.Core" / "Postman" / "Twitch.postman_collection.json")
-    hashes = find_hashes(collection)
-    print(f"Using collection: {collection}")
 
-    if not pathlib.Path(args.config).is_file():
-        print(f"Config not found: {args.config}", file=sys.stderr)
-        return 1
-
-    users = load_users(args.config)
-    if args.user:
-        users = [u for u in users if (u.get("Login") or "").lower() == args.user.lower()]
-    if not users:
-        print("No matching enabled Twitch user(s) found.", file=sys.stderr)
-        return 1
-
+def list_once(users, hashes, dump_json):
     for user in users:
         login = user.get("Login")
         user_id = user.get("Id")
@@ -158,20 +149,79 @@ def main():
             print("    ViewerDropsDashboard:")
             print_rows(dash_rows, "      ")
 
-            details = gql(
-                "DropCampaignDetails",
-                {"dropID": get_ci(campaign, "id"), "channelLogin": user_id},
-                token,
-                hashes,
-            )
-            detail_campaign = get_ci(get_ci(details.get("data") or {}, "user") or {}, "dropCampaign") or {}
+            detail_campaign = fetch_campaign_details(campaign, user, token, hashes)
             det_rows = reward_rows(detail_campaign)
             print("    DropCampaignDetails:")
             print_rows(det_rows, "      ")
 
-        if args.json:
+        if dump_json:
             print("\n----- raw dashboard JSON -----")
             print(json.dumps(dash, indent=2)[:40000])
+
+
+def poll(users, hashes, interval):
+    print(f"\nPolling every {interval}s, showing in-progress drops only (Ctrl+C to stop)")
+    try:
+        while True:
+            stamp = time.strftime("%H:%M:%S")
+            for user in users:
+                token = user.get("ClientSecret")
+                if not token:
+                    continue
+                try:
+                    dash = gql("ViewerDropsDashboard", {"fetchRewardCampaigns": True}, token, hashes)
+                    campaigns = get_ci(get_ci(dash.get("data") or {}, "currentUser") or {}, "dropCampaigns") or []
+                    for campaign in campaigns:
+                        detail_campaign = fetch_campaign_details(campaign, user, token, hashes)
+                        for r in reward_rows(detail_campaign):
+                            if not (r["current"] or r["claimed"]):
+                                continue
+                            print(
+                                f"{stamp} {user.get('Login')} [{get_ci(campaign, 'name')}] "
+                                f"{r['type']} {r['drop']!r}: {r['current']}/{r['minutes']}min claimed={r['claimed']}"
+                            )
+                except Exception as exc:
+                    print(f"{stamp} {user.get('Login')} poll error: {exc}")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description="List active Twitch drop campaigns and their reward types.")
+    parser.add_argument("--config", default="deploy/config/config.json")
+    parser.add_argument("--user", default=None, help="Twitch login to query (default: all enabled)")
+    parser.add_argument("--collection", default=None, help="Path to Twitch.postman_collection.json")
+    parser.add_argument("--json", action="store_true", help="Dump raw dashboard JSON")
+    parser.add_argument(
+        "--poll",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Re-query campaigns every N seconds and print one progress line per in-progress drop (Ctrl+C to stop)",
+    )
+    args = parser.parse_args()
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    collection = args.collection or str(root / "TwitchDropsBot.Core" / "Postman" / "Twitch.postman_collection.json")
+    hashes = find_hashes(collection)
+    print(f"Using collection: {collection}")
+
+    if not pathlib.Path(args.config).is_file():
+        print(f"Config not found: {args.config}", file=sys.stderr)
+        return 1
+
+    users = load_users(args.config)
+    if args.user:
+        users = [u for u in users if (u.get("Login") or "").lower() == args.user.lower()]
+    if not users:
+        print("No matching enabled Twitch user(s) found.", file=sys.stderr)
+        return 1
+
+    if args.poll:
+        poll(users, hashes, args.poll)
+    else:
+        list_once(users, hashes, args.json)
 
     return 0
 

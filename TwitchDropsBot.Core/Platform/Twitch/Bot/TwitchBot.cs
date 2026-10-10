@@ -560,6 +560,14 @@ public class TwitchBot : BaseBot<TwitchUser>
                 }
             }
 
+            if (stuckCounter >= 15)
+            {
+                BotUser.WatchManager.Close();
+                Logger.LogWarning(
+                    $"Drop progress stuck at {minuteWatched}/{requiredMinutesToWatch} for {stuckCounter} checks, reselecting broadcaster...");
+                throw new CurrentDropSessionChanged("Drop progress stuck, reselecting broadcaster.");
+            }
+
             if (string.IsNullOrEmpty(dropCurrentRewardGroup.Id))
             {
                 if (requiredMinutesToWatch - previousMinuteWatched <= 2)
