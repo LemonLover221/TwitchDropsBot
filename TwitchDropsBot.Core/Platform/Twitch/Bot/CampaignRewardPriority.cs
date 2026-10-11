@@ -6,11 +6,22 @@ namespace TwitchDropsBot.Core.Platform.Twitch.Bot;
 public static class CampaignRewardPriority
 {
     public const int BadgeTier = 0;
-    public const int EmoteTier = 1;
-    public const int RegularTier = 2;
+    public const int RewardTier = 1;
+    public const int EmoteTier = 2;
+    public const int RegularTier = 3;
 
     public static int GetRewardTier(AbstractCampaign campaign)
     {
+        if (campaign is RewardCampaign rewardCampaign)
+        {
+            // Reward campaigns (chat badges, capes, ...) don't carry benefit types.
+            // Watch-based ones are the collectible events worth prioritizing;
+            // sub-based ones are filtered out earlier anyway.
+            return (rewardCampaign.UnlockRequirements?.MinuteWatchedGoal ?? 0) > 0
+                ? RewardTier
+                : RegularTier;
+        }
+
         var hasBadge = false;
         var hasEmote = false;
 

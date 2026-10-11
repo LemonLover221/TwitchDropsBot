@@ -668,7 +668,7 @@ public class TwitchBot : BaseBot<TwitchUser>
             campaigns.AddRange(ordered);
 
             Logger.LogInformation(
-                $"Badge priority enabled: {campaigns.Count(c => CampaignRewardPriority.GetRewardTier(c) == CampaignRewardPriority.BadgeTier)} badge campaign(s) moved to the front.");
+                $"Badge priority enabled: {campaigns.Count(c => CampaignRewardPriority.GetRewardTier(c) == CampaignRewardPriority.BadgeTier)} badge drop campaign(s) and {campaigns.Count(c => CampaignRewardPriority.GetRewardTier(c) == CampaignRewardPriority.RewardTier)} watch-based reward campaign(s) prioritized.");
         }
 
         foreach (var campaign in campaigns.ToList())

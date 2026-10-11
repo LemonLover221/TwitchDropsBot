@@ -154,6 +154,22 @@ def list_once(users, hashes, dump_json):
             print("    DropCampaignDetails:")
             print_rows(det_rows, "      ")
 
+        for rc in reward_campaigns:
+            name = get_ci(rc, "name")
+            game = get_ci(get_ci(rc, "game") or {}, "displayName")
+            status = get_ci(rc, "status")
+            end_at = get_ci(rc, "endAt") or get_ci(rc, "endsAt")
+            req = get_ci(rc, "unlockRequirements") or {}
+            rewards = [get_ci(r, "name") for r in (get_ci(rc, "rewards") or [])]
+            instruction = get_ci(rc, "instruction")
+            print(f"\n  * {name} [{game}] (reward campaign) status={status} endAt={end_at}")
+            print(
+                f"      goal: watch={get_ci(req, 'minuteWatchedGoal')}min subs={get_ci(req, 'subsGoal')}"
+            )
+            if instruction:
+                print(f"      instruction: {instruction}")
+            print(f"      rewards: {rewards}")
+
         if dump_json:
             print("\n----- raw dashboard JSON -----")
             print(json.dumps(dash, indent=2)[:40000])
