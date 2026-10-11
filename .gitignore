@@ -370,3 +370,5 @@ publish-local-repository.bat
 deploy/config/
 
 deploy/.env
+.env
+tools/.env
