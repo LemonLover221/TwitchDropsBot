@@ -840,6 +840,11 @@ public class TwitchBot : BaseBot<TwitchUser>
         // For every timebased drop, check if it is claimed
         foreach (var dropCampaignInProgress in inventory.DropCampaignsInProgress)
         {
+            if (dropCampaignInProgress.Self is not null && !dropCampaignInProgress.Self.IsAccountConnected)
+            {
+                continue;
+            }
+            
             foreach (var timeBasedDrop in dropCampaignInProgress.TimeBasedDrops)
             {
                 if (timeBasedDrop.Self is null)
