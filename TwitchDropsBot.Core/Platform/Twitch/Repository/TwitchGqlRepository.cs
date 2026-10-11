@@ -187,6 +187,88 @@ public class TwitchGqlRepository : BotRepository<TwitchUser>
         return notifications;
     }
 
+    public async Task<Game?> FetchGameSlugAsync(string name)
+    {
+        var request = new GraphQLRequest
+        {
+            OperationName = "DirectoryGameRedirect",
+            Variables = new Dictionary<string, object?> { ["name"] = name },
+            Extensions = new Dictionary<string, object?>
+            {
+                ["persistedQuery"] = new Dictionary<string, object?>
+                {
+                    ["version"] = 1,
+                    ["sha256Hash"] = "1f0300090caceec51f33c5e20647aceff9017f740f223c3c532ba6fa59f6b6cc"
+                }
+            }
+        };
+
+        dynamic? resp = await DoGQLRequestAsync(request);
+
+        return resp?.Data.Game;
+    }
+
+    public async Task<List<GlobalBadge>> FetchGlobalBadgesAsync()
+    {
+        var badges = new List<GlobalBadge>();
+
+        using var client = new HttpClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.twitch.tv/helix/chat/badges/global");
+        request.Headers.Add("Client-Id", twitchDevice.ClientID);
+        request.Headers.Add("Authorization", "Bearer " + BotUser.ClientSecret);
+
+        var response = await client.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        foreach (var set in document.RootElement.GetProperty("data").EnumerateArray())
+        {
+            var setId = set.GetProperty("set_id").GetString() ?? string.Empty;
+            foreach (var version in set.GetProperty("versions").EnumerateArray())
+            {
+                string? clickUrl = version.TryGetProperty("click_url", out var clickUrlElement)
+                    ? clickUrlElement.GetString()
+                    : null;
+
+                badges.Add(new GlobalBadge(
+                    setId,
+                    version.GetProperty("title").GetString() ?? setId,
+                    version.GetProperty("description").GetString() ?? string.Empty,
+                    clickUrl
+                ));
+                break;
+            }
+        }
+
+        return badges;
+    }
+
+    public async Task<List<Game>> SearchCategoriesAsync(string query, int first = 5)
+    {
+        var games = new List<Game>();
+
+        using var client = new HttpClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get,
+            $"https://api.twitch.tv/helix/search/categories?query={Uri.EscapeDataString(query)}&first={first}");
+        request.Headers.Add("Client-Id", twitchDevice.ClientID);
+        request.Headers.Add("Authorization", "Bearer " + BotUser.ClientSecret);
+
+        var response = await client.SendAsync(request);
+        response.EnsureSuccessStatusCode();
+
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        foreach (var category in document.RootElement.GetProperty("data").EnumerateArray())
+        {
+            games.Add(new Game
+            {
+                Id = category.GetProperty("id").GetString(),
+                Name = category.GetProperty("name").GetString()
+            });
+        }
+
+        return games;
+    }
+
     public async Task<Game?> FetchDirectoryPageGameAsync(string slug, bool mustHaveDrops)
     {
         var query = CreateQuery("DirectoryPage_Game");

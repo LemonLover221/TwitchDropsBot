@@ -12,6 +12,11 @@ public static class CampaignRewardPriority
 
     public static int GetRewardTier(AbstractCampaign campaign)
     {
+        if (campaign is DropCampaign badgeScanCampaign && badgeScanCampaign.BadgeScanDiscovered)
+        {
+            return BadgeTier;
+        }
+
         if (campaign is RewardCampaign rewardCampaign)
         {
             // Reward campaigns (chat badges, capes, ...) don't carry benefit types.

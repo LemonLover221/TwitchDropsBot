@@ -133,6 +133,32 @@ public class TwitchBot : BaseBot<TwitchUser>
 
         thingsToWatch = favouriteCampaigns.Concat(thingsToWatch).ToList();
 
+        if (TwitchSettings.PrioritizeBadges)
+        {
+            var badgeCampaigns = await BadgeScanner.GetBadgeCampaignsAsync(BotUser.TwitchRepository, Logger);
+            var known = new HashSet<string>(
+                thingsToWatch.Select(campaign => campaign.Id), StringComparer.OrdinalIgnoreCase);
+            var injected = 0;
+
+            foreach (var badgeCampaign in badgeCampaigns)
+            {
+                if (known.Contains(badgeCampaign.Id) || finishedCampaigns.Contains(badgeCampaign))
+                {
+                    continue;
+                }
+
+                thingsToWatch.Insert(0, badgeCampaign);
+                known.Add(badgeCampaign.Id);
+                injected++;
+            }
+
+            if (injected > 0)
+            {
+                Logger.LogInformation(
+                    "Badge scan injected {Count} campaign(s) discovered from the global badge catalog.", injected);
+            }
+        }
+
         TimeBasedDrop? timeBasedDrop = null;
         DropCurrentSession? dropCurrentSession = null;
         DropsRewardGroup? dropCurrentRewardGroup = null;
@@ -231,7 +257,9 @@ public class TwitchBot : BaseBot<TwitchUser>
 
             timeBasedDrop = campaign.FindTimeBasedDrop(dropCurrentRewardGroup.Id);
 
-            if (timeBasedDrop is null && campaign is not RewardCampaign)
+            if (timeBasedDrop is null
+                && campaign is not RewardCampaign
+                && campaign is not DropCampaign { BadgeScanDiscovered: true })
             {
                 Logger.LogInformation("Time based drop not found, skipping");
                 thingsToWatch.Remove(campaign);
