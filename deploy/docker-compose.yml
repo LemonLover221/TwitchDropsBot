@@ -2,6 +2,7 @@ services:
   twitchdropsbot:
     image: ghcr.io/lemonlover221/twitchdropsbot:${TDB_TAG:-latest}
     container_name: TwitchDropsBot
+    user: "${TDB_UID:-1000}:${TDB_UID:-1000}"
     volumes:
       - ./config:/app/Configuration
       - ./logs:/app/logs
