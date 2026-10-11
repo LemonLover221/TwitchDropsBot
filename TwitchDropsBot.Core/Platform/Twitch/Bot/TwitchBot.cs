@@ -231,16 +231,19 @@ public class TwitchBot : BaseBot<TwitchUser>
 
             timeBasedDrop = campaign.FindTimeBasedDrop(dropCurrentRewardGroup.Id);
 
-            if (timeBasedDrop is null)
+            if (timeBasedDrop is null && campaign is not RewardCampaign)
             {
                 Logger.LogInformation("Time based drop not found, skipping");
                 thingsToWatch.Remove(campaign);
                 continue;
             }
 
-            Logger.LogInformation($"Time based drops : {timeBasedDrop.Name}");
+            if (timeBasedDrop is not null)
+            {
+                Logger.LogInformation($"Time based drops : {timeBasedDrop.Name}");
+            }
             // } while (timeBasedDrop is null || dropCurrentSession is null || broadcaster is null || campaign is null);
-        } while (timeBasedDrop is null || dropCurrentRewardGroup is null || broadcaster is null || campaign is null);
+        } while (dropCurrentRewardGroup is null || broadcaster is null || campaign is null);
 
 
         BotUser.CurrentTimeBasedDrop = timeBasedDrop;
@@ -690,12 +693,15 @@ public class TwitchBot : BaseBot<TwitchUser>
             if (campaign.TimeBasedDrops.Count == 0)
             {
                 var tempDropCampaign = await BotUser.TwitchRepository.FetchTimeBasedDropsAsync(campaign.Id);
-                campaign.TimeBasedDrops = tempDropCampaign.TimeBasedDrops;
-                campaign.Game = tempDropCampaign.Game;
-                campaign.Allow = tempDropCampaign.Allow;
+                if (tempDropCampaign is not null)
+                {
+                    campaign.TimeBasedDrops = tempDropCampaign.TimeBasedDrops;
+                    campaign.Game = tempDropCampaign.Game;
+                    campaign.Allow = tempDropCampaign.Allow;
+                }
             }
 
-            if (campaign.TimeBasedDrops.Count == 0)
+            if (campaign.TimeBasedDrops.Count == 0 && campaign is not RewardCampaign)
             {
                 Logger.LogInformation("No time based drops available for this campaign ({campaign.Name}), skipping",
                     campaign.Name);
