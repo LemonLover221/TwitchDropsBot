@@ -840,6 +840,14 @@ public class TwitchBot : BaseBot<TwitchUser>
                 }
             }
 
+            if (string.IsNullOrEmpty(campaign.Game.Slug))
+            {
+                Logger.LogInformation(
+                    "Skipping campaign {campaign.Name}: no game slug to search for channels.", campaign.Name);
+                campaigns.Remove(campaign);
+                continue;
+            }
+
             // Search for channel that potentially have the drops
             var game = await BotUser.TwitchRepository.FetchDirectoryPageGameAsync(campaign.Game.Slug,
                 campaign is DropCampaign);

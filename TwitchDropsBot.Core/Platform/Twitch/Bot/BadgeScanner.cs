@@ -237,7 +237,25 @@ public static class BadgeScanner
         }
 
         var campaigns = await repository.FetchAvailableDropsRawAsync(user.Id);
-        return MatchBadge(campaigns, badge);
+        var match = MatchBadge(campaigns, badge);
+        if (match.Campaign != null)
+        {
+            if (match.Campaign.Game is null || string.IsNullOrEmpty(match.Campaign.Game.Name))
+            {
+                return new ScanMatch(null, false);
+            }
+
+            match.Campaign.Game.DisplayName ??= match.Campaign.Game.Name;
+            var slugGame = await repository.FetchGameSlugAsync(match.Campaign.Game.Name);
+            if (string.IsNullOrEmpty(slugGame?.Slug))
+            {
+                return new ScanMatch(null, false);
+            }
+
+            match.Campaign.Game.Slug = slugGame!.Slug;
+        }
+
+        return match;
     }
 
     private static async Task<ScanMatch> TryResolveViaCategoryAsync(
@@ -262,6 +280,7 @@ public static class BadgeScanner
             var match = MatchBadge(campaigns, badge);
             if (match.Campaign != null)
             {
+                game.Slug ??= slug;
                 match.Campaign!.Game = game;
                 match.Campaign.Game.DisplayName ??= match.Campaign.Game.Name;
                 return match;
