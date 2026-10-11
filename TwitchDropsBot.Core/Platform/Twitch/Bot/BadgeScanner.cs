@@ -1,5 +1,7 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 using TwitchDropsBot.Core.Platform.Twitch.Models;
 using TwitchDropsBot.Core.Platform.Twitch.Repository;
 
@@ -13,9 +15,12 @@ public static class BadgeScanner
     private sealed class BadgeState
     {
         public DropCampaign? Campaign;
+        public bool NotWatchable;
         public DateTime NextAttemptUtc;
         public int Attempts;
     }
+
+    private sealed record ScanMatch(DropCampaign? Campaign, bool NotWatchable);
 
     private static readonly Dictionary<string, BadgeState> Cache = new(StringComparer.OrdinalIgnoreCase);
     private static DateTime _lastSweepUtc = DateTime.MinValue;
@@ -88,7 +93,7 @@ public static class BadgeScanner
             }
         }
 
-        int matched = 0, unresolved = 0;
+        int matched = 0, unresolved = 0, deferred = 0;
 
         foreach (var badge in watchBased)
         {
@@ -100,6 +105,12 @@ public static class BadgeScanner
                     continue;
                 }
 
+                if (known.NotWatchable)
+                {
+                    deferred++;
+                    continue;
+                }
+
                 if (DateTime.UtcNow < known.NextAttemptUtc)
                 {
                     unresolved++;
@@ -108,11 +119,14 @@ public static class BadgeScanner
             }
 
             DropCampaign? campaign = null;
+            var notWatchable = false;
             string? failure = null;
 
             try
             {
-                campaign = await ResolveBadgeAsync(badge, repository);
+                var match = await ResolveBadgeAsync(badge, repository);
+                campaign = match.Campaign;
+                notWatchable = match.NotWatchable;
             }
             catch (Exception ex)
             {
@@ -120,11 +134,14 @@ public static class BadgeScanner
             }
 
             var attempts = (known?.Attempts ?? 0) + 1;
-            var backoffSeconds = Math.Min(SweepInterval.TotalSeconds * Math.Pow(2, attempts - 1), TimeSpan.FromHours(24).TotalSeconds);
+            var backoffSeconds = Math.Min(
+                SweepInterval.TotalSeconds * Math.Pow(2, attempts - 1),
+                TimeSpan.FromHours(24).TotalSeconds);
 
             Cache[badge.SetId] = new BadgeState
             {
                 Campaign = campaign,
+                NotWatchable = notWatchable,
                 Attempts = attempts,
                 NextAttemptUtc = DateTime.UtcNow.AddSeconds(backoffSeconds)
             };
@@ -135,6 +152,12 @@ public static class BadgeScanner
                 logger.LogInformation(
                     "Badge scan: '{Title}' -> campaign '{Campaign}' ({Game})",
                     badge.Title, campaign.Name, campaign.Game?.DisplayName ?? campaign.Game?.Name);
+            }
+            else if (notWatchable)
+            {
+                deferred++;
+                logger.LogInformation(
+                    "Badge scan: '{Title}' is not earnable by watching, skipping", badge.Title);
             }
             else
             {
@@ -147,18 +170,18 @@ public static class BadgeScanner
         }
 
         logger.LogInformation(
-            "Badge scan: {Total} global badge(s), {Watch} watch-based, {Matched} resolved to campaign(s), {Unresolved} unresolved (retried next sweep)",
-            badges.Count, watchBased.Count, matched, unresolved);
+            "Badge scan: {Total} global badge(s), {Watch} watch-based, {Matched} resolved to campaign(s), {Unresolved} unresolved, {Deferred} not watchable",
+            badges.Count, watchBased.Count, matched, unresolved, deferred);
     }
 
-    private static async Task<DropCampaign?> ResolveBadgeAsync(GlobalBadge badge, TwitchGqlRepository repository)
+    private static async Task<ScanMatch> ResolveBadgeAsync(GlobalBadge badge, TwitchGqlRepository repository)
     {
         foreach (var channelLogin in ExtractChannelHints(badge))
         {
-            var channelCampaign = await TryResolveViaChannelAsync(channelLogin, badge, repository);
-            if (channelCampaign != null)
+            var channelMatch = await TryResolveViaChannelAsync(channelLogin, badge, repository);
+            if (channelMatch.Campaign != null || channelMatch.NotWatchable)
             {
-                return channelCampaign;
+                return channelMatch;
             }
         }
 
@@ -193,51 +216,38 @@ public static class BadgeScanner
                 continue;
             }
 
-            var campaign = await TryResolveViaCategoryAsync(slugGame!.Slug!, badge, repository);
-            if (campaign != null)
+            var categoryMatch = await TryResolveViaCategoryAsync(slugGame!.Slug!, badge, repository);
+            if (categoryMatch.Campaign != null || categoryMatch.NotWatchable)
             {
-                return campaign;
+                return categoryMatch;
             }
         }
 
-        return null;
+        return new ScanMatch(null, false);
     }
 
-    private static async Task<DropCampaign?> TryResolveViaChannelAsync(
+    private static async Task<ScanMatch> TryResolveViaChannelAsync(
         string channelLogin, GlobalBadge badge, TwitchGqlRepository repository)
     {
         var users = await repository.FetchStreamInformationAsync(new[] { channelLogin });
         var user = users?.FirstOrDefault();
         if (user is null || string.IsNullOrEmpty(user.Id))
         {
-            return null;
+            return new ScanMatch(null, false);
         }
 
-        var campaigns = await repository.FetchAvailableDropsAsync(user.Id);
-        var match = MatchBadge(campaigns, badge);
-        if (match is null || match.Game is null || string.IsNullOrEmpty(match.Game.Name))
-        {
-            return null;
-        }
-
-        match.Game.DisplayName ??= match.Game.Name;
-        var slugGame = await repository.FetchGameSlugAsync(match.Game.Name);
-        if (!string.IsNullOrEmpty(slugGame?.Slug))
-        {
-            match.Game.Slug = slugGame!.Slug;
-        }
-
-        return match;
+        var campaigns = await repository.FetchAvailableDropsRawAsync(user.Id);
+        return MatchBadge(campaigns, badge);
     }
 
-    private static async Task<DropCampaign?> TryResolveViaCategoryAsync(
+    private static async Task<ScanMatch> TryResolveViaCategoryAsync(
         string slug, GlobalBadge badge, TwitchGqlRepository repository)
     {
         var game = await repository.FetchDirectoryPageGameAsync(slug, true);
         var edges = game?.Streams?.Edges;
         if (game is null || edges is null || edges.Count == 0)
         {
-            return null;
+            return new ScanMatch(null, false);
         }
 
         foreach (var edge in edges.Take(2))
@@ -248,44 +258,204 @@ public static class BadgeScanner
                 continue;
             }
 
-            var campaigns = await repository.FetchAvailableDropsAsync(broadcaster.Id);
+            var campaigns = await repository.FetchAvailableDropsRawAsync(broadcaster.Id);
             var match = MatchBadge(campaigns, badge);
-            if (match != null)
+            if (match.Campaign != null)
             {
-                match.Game = game;
-                match.Game.DisplayName ??= match.Game.Name;
+                match.Campaign!.Game = game;
+                match.Campaign.Game.DisplayName ??= match.Campaign.Game.Name;
                 return match;
             }
+
+            if (match.NotWatchable)
+            {
+                return match;
+            }
+        }
+
+        return new ScanMatch(null, false);
+    }
+
+    private static ScanMatch MatchBadge(JsonElement? campaignsElement, GlobalBadge badge)
+    {
+        if (campaignsElement is not { ValueKind: JsonValueKind.Array } campaigns)
+        {
+            return new ScanMatch(null, false);
+        }
+
+        var target = Normalize(badge.SetId);
+        var targetTitle = Normalize(badge.Title);
+        if (target.Length == 0 && targetTitle.Length == 0)
+        {
+            return new ScanMatch(null, false);
+        }
+
+        foreach (var campaign in campaigns.EnumerateArray())
+        {
+            if (!campaign.TryGetProperty("timeBasedDrops", out var dropsElement)
+                || dropsElement.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
+
+            foreach (var drop in dropsElement.EnumerateArray())
+            {
+                var dropName = Normalize(GetString(drop, "name") ?? "");
+                var benefitName = Normalize(GetBenefitName(drop) ?? "");
+
+                var matches = dropName == target || dropName == targetTitle
+                              || (benefitName.Length > 0 && (benefitName == target || benefitName == targetTitle));
+
+                if (!matches)
+                {
+                    continue;
+                }
+
+                if (GetInt(drop, "requiredMinutesWatched") <= 0)
+                {
+                    return new ScanMatch(null, true);
+                }
+
+                var built = BuildCampaign(campaign);
+                if (built == null || built.TimeBasedDrops.Count == 0)
+                {
+                    return new ScanMatch(null, true);
+                }
+
+                return new ScanMatch(built, false);
+            }
+        }
+
+        return new ScanMatch(null, false);
+    }
+
+    private static DropCampaign? BuildCampaign(JsonElement campaign)
+    {
+        if (campaign.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        Game? game = null;
+        if (campaign.TryGetProperty("game", out var gameElement) && gameElement.ValueKind == JsonValueKind.Object)
+        {
+            var name = GetString(gameElement, "name");
+            game = new Game
+            {
+                Id = GetString(gameElement, "id"),
+                Name = name,
+                DisplayName = name
+            };
+        }
+
+        var drops = new List<TimeBasedDrop>();
+        if (campaign.TryGetProperty("timeBasedDrops", out var dropsElement)
+            && dropsElement.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var drop in dropsElement.EnumerateArray())
+            {
+                var minutes = GetInt(drop, "requiredMinutesWatched");
+                if (minutes <= 0)
+                {
+                    continue;
+                }
+
+                var benefit = GetBenefit(drop);
+                drops.Add(new TimeBasedDrop
+                {
+                    Id = GetString(drop, "id"),
+                    Name = GetString(drop, "name"),
+                    StartAt = GetDateTime(drop, "startAt"),
+                    EndAt = GetDateTime(drop, "endAt"),
+                    RequiredMinutesWatched = minutes,
+                    RequiredSubs = GetInt(drop, "requiredSubs"),
+                    BenefitEdges = benefit == null
+                        ? new List<DropBenefitEdge>()
+                        : new List<DropBenefitEdge>
+                        {
+                            new()
+                            {
+                                Benefit = benefit
+                            }
+                        }
+                });
+            }
+        }
+
+        if (drops.Count == 0)
+        {
+            return null;
+        }
+
+        return new DropCampaign
+        {
+            Id = GetString(campaign, "id"),
+            Name = GetString(campaign, "name"),
+            Status = GetString(campaign, "status"),
+            StartAt = drops.Min(drop => drop.StartAt),
+            EndAt = GetDateTime(campaign, "endAt") == default
+                ? drops.Max(drop => drop.EndAt)
+                : GetDateTime(campaign, "endAt"),
+            Game = game,
+            BadgeScanDiscovered = true,
+            TimeBasedDrops = drops
+        };
+    }
+
+    private static string? GetBenefitName(JsonElement drop)
+    {
+        var benefit = GetBenefit(drop);
+        return benefit?.Name;
+    }
+
+    private static DropBenefit? GetBenefit(JsonElement drop)
+    {
+        if (!drop.TryGetProperty("benefitEdges", out var edges) || edges.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var edge in edges.EnumerateArray())
+        {
+            if (!edge.TryGetProperty("benefit", out var benefitElement)
+                || benefitElement.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            return new DropBenefit
+            {
+                Id = GetString(benefitElement, "id"),
+                Name = GetString(benefitElement, "name"),
+                ImageAssetURL = GetString(benefitElement, "imageAssetURL")
+            };
         }
 
         return null;
     }
 
-    private static DropCampaign? MatchBadge(List<DropCampaign> campaigns, GlobalBadge badge)
+    private static string? GetString(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static int GetInt(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out var result)
+            ? result
+            : 0;
+
+    private static DateTime GetDateTime(JsonElement element, string name)
     {
-        var target = Normalize(badge.SetId);
-        var targetTitle = Normalize(badge.Title);
-        if (target.Length == 0 && targetTitle.Length == 0)
-        {
-            return null;
-        }
-
-        foreach (var campaign in campaigns)
-        {
-            foreach (var drop in campaign.TimeBasedDrops ?? new List<TimeBasedDrop>())
-            {
-                var dropName = Normalize(drop.Name ?? "");
-                var benefitName = Normalize(drop.BenefitEdges?.FirstOrDefault()?.Benefit?.Name ?? "");
-
-                if (dropName == target || dropName == targetTitle
-                    || (benefitName.Length > 0 && (benefitName == target || benefitName == targetTitle)))
-                {
-                    return campaign;
-                }
-            }
-        }
-
-        return null;
+        var text = GetString(element, name);
+        return DateTime.TryParse(text, CultureInfo.InvariantCulture,
+                   DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsed)
+            ? parsed
+            : default;
     }
 
     private static List<string> ExtractCategoryNames(string description)

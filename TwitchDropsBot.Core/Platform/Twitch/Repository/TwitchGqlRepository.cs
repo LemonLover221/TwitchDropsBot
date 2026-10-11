@@ -419,7 +419,40 @@ public class TwitchGqlRepository : BotRepository<TwitchUser>
         return channelDropCampaignsProgress;
     }
 
-    // The channel must be live to get the drops
+    public async Task<JsonElement?> FetchAvailableDropsRawAsync(string channelId)
+    {
+        var query = CreateQuery("DropsHighlightService_AvailableDrops");
+
+        if (query.Variables is Dictionary<string, object?> variables)
+        {
+            variables["channelID"] = channelId;
+        }
+
+        var payload = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["operationName"] = query.OperationName,
+            ["variables"] = query.Variables,
+            ["extensions"] = query.Extensions
+        });
+
+        using var response = await twitchHttpServiceGql.HttpClient.PostAsync(
+            "https://gql.twitch.tv/gql",
+            new StringContent(payload, System.Text.Encoding.UTF8, "application/json"));
+        response.EnsureSuccessStatusCode();
+
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+        if (document.RootElement.TryGetProperty("data", out var data)
+            && data.TryGetProperty("channel", out var channel)
+            && channel.TryGetProperty("viewerDropCampaigns", out var campaigns)
+            && campaigns.ValueKind == JsonValueKind.Array)
+        {
+            return campaigns.Clone();
+        }
+
+        return null;
+    }
+
     public async Task<List<DropCampaign>> FetchAvailableDropsAsync(string? channel)
     {
         if (channel == null)
