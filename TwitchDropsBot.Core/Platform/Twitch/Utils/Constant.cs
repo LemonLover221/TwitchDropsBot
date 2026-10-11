@@ -4,5 +4,5 @@ namespace TwitchDropsBot.Core.Platform.Twitch.Utils;
 
 public class Constant
 {
-    public static readonly TwitchDevice TwitchDevice = TwitchDeviceType.ANDROID_APP;
+    public static readonly TwitchDevice TwitchDevice = TwitchDeviceType.SMARTBOX;
 }

@@ -7,8 +7,8 @@ import time
 import urllib.error
 import urllib.request
 
-ANDROID_CLIENT_ID = "kd1unb4b3q4t58fwlpcbzcbnm76a8fp"
-ANDROID_UA = "Dalvik/2.1.0 (Linux; U; Android 15; SM-G977N Build/BP1A.250505.005)"
+ANDROID_CLIENT_ID = "ue6666qo983tsx6so1t0vnawi233wa"
+ANDROID_UA = "Mozilla/5.0 (Linux; Android 7.1; Smart Box C1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
 GQL_URL = "https://gql.twitch.tv/gql"
 
 FALLBACK_HASHES = {
