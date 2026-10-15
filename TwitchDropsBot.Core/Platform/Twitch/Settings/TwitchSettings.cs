@@ -11,5 +11,6 @@ public class TwitchSettings
     public bool ForceTryWithTags { get; set; } = false;
     public bool OnlyConnectedAccounts { get; set; } = false;
     public bool PrioritizeBadges { get; set; } = false;
+    public List<string> ScanCategories { get; set; } = new List<string>();
     public string WatchManager { get; set; } = WatchManagerType.WatchRequest;
 }

@@ -85,14 +85,16 @@ public class TwitchBot : BaseBot<TwitchUser>
         if (TwitchSettings.PrioritizeBadges)
         {
             var ownedBadges = await BotUser.TwitchRepository.FetchOwnedBadgeSetIdsAsync();
-            var badgeCampaigns = BadgeScanner.GetBadgeCampaigns(BotUser.TwitchRepository, Logger);
+            var badgeCampaigns = BadgeScanner.GetBadgeCampaigns(
+                BotUser.TwitchRepository, Logger, TwitchSettings.ScanCategories);
             var known = new HashSet<string>(
                 thingsToWatch.Select(campaign => campaign.Id), StringComparer.OrdinalIgnoreCase);
             var injected = 0;
 
             foreach (var badgeCampaign in badgeCampaigns)
             {
-                if (ownedBadges.Contains(BadgeScanner.Normalize(badgeCampaign.SetId)))
+                if (!string.IsNullOrEmpty(badgeCampaign.SetId)
+                    && ownedBadges.Contains(BadgeScanner.Normalize(badgeCampaign.SetId)))
                 {
                     Logger.LogInformation(
                         "Badge scan skipping '{SetId}': account already owns the badge.", badgeCampaign.SetId);
@@ -707,7 +709,7 @@ public class TwitchBot : BaseBot<TwitchUser>
             campaigns.AddRange(ordered);
 
             Logger.LogInformation(
-                $"Badge priority enabled: {campaigns.Count(c => CampaignRewardPriority.GetRewardTier(c) == CampaignRewardPriority.BadgeTier)} badge drop campaign(s) and {campaigns.Count(c => CampaignRewardPriority.GetRewardTier(c) == CampaignRewardPriority.RewardTier)} watch-based reward campaign(s) prioritized.");
+                $"Priority enabled: {campaigns.Count(c => CampaignRewardPriority.GetRewardTier(c) == CampaignRewardPriority.BadgeTier)} badge, {campaigns.Count(c => CampaignRewardPriority.GetRewardTier(c) == CampaignRewardPriority.EmoteTier)} emote, {campaigns.Count(c => CampaignRewardPriority.GetRewardTier(c) == CampaignRewardPriority.RewardTier)} reward campaign(s) prioritized.");
         }
 
         foreach (var campaign in campaigns.ToList())

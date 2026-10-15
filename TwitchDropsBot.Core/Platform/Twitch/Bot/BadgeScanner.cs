@@ -25,6 +25,7 @@ public static class BadgeScanner
     private sealed record ScanMatch(DropCampaign? Campaign, bool NotWatchable);
 
     private static readonly Dictionary<string, BadgeState> Cache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, DropCampaign> Harvested = new(StringComparer.OrdinalIgnoreCase);
     private static readonly object CacheGate = new();
     private static DateTime _lastSweepUtc = DateTime.MinValue;
 
@@ -35,19 +36,31 @@ public static class BadgeScanner
     private static readonly Regex TimeRx =
         new(@"\d+\s*(?:minute|hour)s?\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    public static List<BadgeCampaign> GetBadgeCampaigns(TwitchGqlRepository repository, ILogger logger)
+    public static List<BadgeCampaign> GetBadgeCampaigns(
+        TwitchGqlRepository repository, ILogger logger, List<string>? scanCategories = null)
     {
-        TryStartSweep(repository, logger);
+        TryStartSweep(repository, logger, scanCategories);
 
         var campaigns = new List<BadgeCampaign>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         lock (CacheGate)
         {
             foreach (var (setId, state) in Cache)
             {
-                if (state.Campaign != null)
+                if (state.Campaign != null && seen.Add(state.Campaign.Id ?? ""))
                 {
-                    campaigns.Add(new BadgeCampaign(CloneForAccount(state.Campaign), setId));
+                    var clone = CloneForAccount(state.Campaign);
+                    clone.ScanTier = CampaignRewardPriority.BadgeTier;
+                    campaigns.Add(new BadgeCampaign(clone, setId));
+                }
+            }
+
+            foreach (var harvested in Harvested.Values)
+            {
+                if (seen.Add(harvested.Id ?? ""))
+                {
+                    campaigns.Add(new BadgeCampaign(CloneForAccount(harvested), ""));
                 }
             }
         }
@@ -55,7 +68,8 @@ public static class BadgeScanner
         return campaigns;
     }
 
-    private static void TryStartSweep(TwitchGqlRepository repository, ILogger logger)
+    private static void TryStartSweep(
+        TwitchGqlRepository repository, ILogger logger, List<string>? scanCategories)
     {
         lock (CacheGate)
         {
@@ -71,7 +85,7 @@ public static class BadgeScanner
         {
             try
             {
-                await SweepAsync(repository, logger);
+                await SweepAsync(repository, logger, scanCategories);
             }
             catch (Exception ex)
             {
@@ -84,7 +98,8 @@ public static class BadgeScanner
         });
     }
 
-    private static async Task SweepAsync(TwitchGqlRepository repository, ILogger logger)
+    private static async Task SweepAsync(
+        TwitchGqlRepository repository, ILogger logger, List<string>? scanCategories)
     {
         var badges = await repository.FetchGlobalBadgesAsync();
         if (badges.Count == 0)
@@ -197,8 +212,56 @@ public static class BadgeScanner
         }
 
         logger.LogInformation(
-            "Badge scan: {Total} global badge(s), {Watch} watch-based, {Matched} resolved to campaign(s), {Unresolved} unresolved, {Deferred} not watchable",
-            badges.Count, watchBased.Count, matched, unresolved, deferred);
+            "Badge scan: {Total} global badge(s), {Watch} watch-based, {Matched} resolved to campaign(s), {Unresolved} unresolved, {Deferred} not watchable, {Harvested} harvested campaign(s)",
+            badges.Count, watchBased.Count, matched, unresolved, deferred, Harvested.Count);
+
+        if (scanCategories is { Count: > 0 })
+        {
+            foreach (var categoryName in scanCategories)
+            {
+                if (string.IsNullOrWhiteSpace(categoryName))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var slugGame = await repository.FetchGameSlugAsync(categoryName.Trim());
+                    if (string.IsNullOrEmpty(slugGame?.Slug))
+                    {
+                        logger.LogInformation(
+                            "Badge scan: could not resolve scan category '{Category}'", categoryName);
+                        continue;
+                    }
+
+                    var game = await repository.FetchDirectoryPageGameAsync(slugGame!.Slug!, true);
+                    var edges = game?.Streams?.Edges;
+                    if (game is null || edges is null || edges.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    foreach (var edge in edges.Take(2))
+                    {
+                        var broadcaster = edge.Node?.Broadcaster;
+                        if (broadcaster is null || string.IsNullOrEmpty(broadcaster.Id))
+                        {
+                            continue;
+                        }
+
+                        var campaigns = await repository.FetchAvailableDropsRawAsync(broadcaster.Id);
+                        HarvestCampaigns(campaigns);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Badge scan: sweep of category '{Category}' failed", categoryName);
+                }
+            }
+
+            logger.LogInformation(
+                "Badge scan: category sweep done, {Harvested} harvested campaign(s) total", Harvested.Count);
+        }
     }
 
     private static async Task<ScanMatch> ResolveBadgeAsync(GlobalBadge badge, TwitchGqlRepository repository)
@@ -264,6 +327,7 @@ public static class BadgeScanner
         }
 
         var campaigns = await repository.FetchAvailableDropsRawAsync(user.Id);
+        HarvestCampaigns(campaigns);
         var match = MatchBadge(campaigns, badge);
         if (match.Campaign != null)
         {
@@ -304,6 +368,7 @@ public static class BadgeScanner
             }
 
             var campaigns = await repository.FetchAvailableDropsRawAsync(broadcaster.Id);
+            HarvestCampaigns(campaigns);
             var match = MatchBadge(campaigns, badge);
             if (match.Campaign != null)
             {
@@ -373,6 +438,73 @@ public static class BadgeScanner
         }
 
         return new ScanMatch(null, false);
+    }
+
+    private static void HarvestCampaigns(JsonElement? campaignsElement)
+    {
+        if (campaignsElement is not { ValueKind: JsonValueKind.Array } campaigns)
+        {
+            return;
+        }
+
+        lock (CacheGate)
+        {
+            foreach (var raw in campaigns.EnumerateArray())
+            {
+                var built = BuildCampaign(raw);
+                if (built is null || string.IsNullOrEmpty(built.Id))
+                {
+                    continue;
+                }
+
+                built.BadgeScanDiscovered = true;
+                built.ScanTier = ComputeScanTier(built);
+                Harvested[built.Id!] = built;
+            }
+        }
+    }
+
+    private static int ComputeScanTier(DropCampaign campaign)
+    {
+        foreach (var drop in campaign.TimeBasedDrops)
+        {
+            foreach (var edge in drop.BenefitEdges ?? new List<DropBenefitEdge>())
+            {
+                if (edge.Benefit?.DistributionType == DistributionType.BADGE)
+                {
+                    return CampaignRewardPriority.BadgeTier;
+                }
+            }
+        }
+
+        foreach (var drop in campaign.TimeBasedDrops)
+        {
+            foreach (var edge in drop.BenefitEdges ?? new List<DropBenefitEdge>())
+            {
+                if (edge.Benefit?.DistributionType == DistributionType.EMOTE)
+                {
+                    return CampaignRewardPriority.EmoteTier;
+                }
+            }
+        }
+
+        foreach (var drop in campaign.TimeBasedDrops)
+        {
+            var dropName = Normalize(drop.Name ?? "");
+            var benefitName = Normalize(drop.BenefitEdges?.FirstOrDefault()?.Benefit?.Name ?? "");
+
+            if (dropName.Length > 0 && Cache.ContainsKey(dropName))
+            {
+                return CampaignRewardPriority.BadgeTier;
+            }
+
+            if (benefitName.Length > 0 && Cache.ContainsKey(benefitName))
+            {
+                return CampaignRewardPriority.BadgeTier;
+            }
+        }
+
+        return CampaignRewardPriority.RegularTier;
     }
 
     private static DropCampaign? BuildCampaign(JsonElement campaign)
@@ -469,12 +601,16 @@ public static class BadgeScanner
                 continue;
             }
 
-            return new DropBenefit
-            {
-                Id = GetString(benefitElement, "id"),
-                Name = GetString(benefitElement, "name"),
-                ImageAssetURL = GetString(benefitElement, "imageAssetURL")
-            };
+                return new DropBenefit
+                {
+                    Id = GetString(benefitElement, "id"),
+                    Name = GetString(benefitElement, "name"),
+                    ImageAssetURL = GetString(benefitElement, "imageAssetURL"),
+                    DistributionType = Enum.TryParse<DistributionType>(
+                        GetString(benefitElement, "distributionType"), out var parsedType)
+                        ? parsedType
+                        : null
+                };
         }
 
         return null;
@@ -651,6 +787,7 @@ public static class BadgeScanner
         Game = campaign.Game,
         Allow = campaign.Allow,
         BadgeScanDiscovered = true,
+        ScanTier = campaign.ScanTier,
         TimeBasedDrops = campaign.TimeBasedDrops.Select(drop => new TimeBasedDrop
         {
             Id = drop.Id,
@@ -669,7 +806,8 @@ public static class BadgeScanner
                         Id = edge.Benefit.Id,
                         Name = edge.Benefit.Name,
                         ImageAssetURL = edge.Benefit.ImageAssetURL,
-                        Game = edge.Benefit.Game
+                        Game = edge.Benefit.Game,
+                        DistributionType = edge.Benefit.DistributionType
                     }
             }).ToList()
         }).ToList()

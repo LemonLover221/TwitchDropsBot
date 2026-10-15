@@ -6,15 +6,15 @@ namespace TwitchDropsBot.Core.Platform.Twitch.Bot;
 public static class CampaignRewardPriority
 {
     public const int BadgeTier = 0;
-    public const int RewardTier = 1;
-    public const int EmoteTier = 2;
+    public const int EmoteTier = 1;
+    public const int RewardTier = 2;
     public const int RegularTier = 3;
 
     public static int GetRewardTier(AbstractCampaign campaign)
     {
         if (campaign is DropCampaign badgeScanCampaign && badgeScanCampaign.BadgeScanDiscovered)
         {
-            return BadgeTier;
+            return badgeScanCampaign.ScanTier;
         }
 
         if (campaign is RewardCampaign rewardCampaign)
