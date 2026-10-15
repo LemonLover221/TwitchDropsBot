@@ -250,7 +250,7 @@ public static class BadgeScanner
                         }
 
                         var campaigns = await repository.FetchAvailableDropsRawAsync(broadcaster.Id);
-                        HarvestCampaigns(campaigns);
+                        await HarvestCampaignsAsync(repository, campaigns);
                     }
                 }
                 catch (Exception ex)
@@ -327,7 +327,7 @@ public static class BadgeScanner
         }
 
         var campaigns = await repository.FetchAvailableDropsRawAsync(user.Id);
-        HarvestCampaigns(campaigns);
+        await HarvestCampaignsAsync(repository, campaigns);
         var match = MatchBadge(campaigns, badge);
         if (match.Campaign != null)
         {
@@ -368,7 +368,7 @@ public static class BadgeScanner
             }
 
             var campaigns = await repository.FetchAvailableDropsRawAsync(broadcaster.Id);
-            HarvestCampaigns(campaigns);
+            await HarvestCampaignsAsync(repository, campaigns);
             var match = MatchBadge(campaigns, badge);
             if (match.Campaign != null)
             {
@@ -440,25 +440,61 @@ public static class BadgeScanner
         return new ScanMatch(null, false);
     }
 
-    private static void HarvestCampaigns(JsonElement? campaignsElement)
+    private static readonly Dictionary<string, string> SlugByName = new(StringComparer.OrdinalIgnoreCase);
+
+    private static async Task HarvestCampaignsAsync(
+        TwitchGqlRepository repository, JsonElement? campaignsElement)
     {
         if (campaignsElement is not { ValueKind: JsonValueKind.Array } campaigns)
         {
             return;
         }
 
-        lock (CacheGate)
+        var builtCampaigns = new List<DropCampaign>();
+
+        foreach (var raw in campaigns.EnumerateArray())
         {
-            foreach (var raw in campaigns.EnumerateArray())
+            var built = BuildCampaign(raw);
+            if (built is null || string.IsNullOrEmpty(built.Id) || built.Game?.Name is null)
             {
-                var built = BuildCampaign(raw);
-                if (built is null || string.IsNullOrEmpty(built.Id))
+                continue;
+            }
+
+            built.BadgeScanDiscovered = true;
+            built.ScanTier = ComputeScanTier(built);
+            builtCampaigns.Add(built);
+        }
+
+        foreach (var built in builtCampaigns)
+        {
+            if (string.IsNullOrEmpty(built.Game!.Slug))
+            {
+                string slug;
+                lock (SlugByName)
                 {
-                    continue;
+                    SlugByName.TryGetValue(built.Game.Name!, out slug);
                 }
 
-                built.BadgeScanDiscovered = true;
-                built.ScanTier = ComputeScanTier(built);
+                if (string.IsNullOrEmpty(slug))
+                {
+                    var slugGame = await repository.FetchGameSlugAsync(built.Game.Name!);
+                    slug = slugGame?.Slug ?? "";
+                    lock (SlugByName)
+                    {
+                        SlugByName[built.Game.Name!] = slug;
+                    }
+                }
+
+                built.Game.Slug = slug;
+            }
+
+            if (string.IsNullOrEmpty(built.Game.Slug))
+            {
+                continue;
+            }
+
+            lock (CacheGate)
+            {
                 Harvested[built.Id!] = built;
             }
         }

@@ -141,7 +141,7 @@ public class TwitchBot : BaseBot<TwitchUser>
         // Assuming you have a list of favorite game names
         var favoriteGameNames = _gamesToCheck;
 
-        var favouriteCampaigns = thingsToWatch.Where(x => x.Game.IsFavorite).ToList();
+        var favouriteCampaigns = thingsToWatch.Where(x => x.Game is not null && x.Game.IsFavorite).ToList();
         thingsToWatch.RemoveAll(x => favouriteCampaigns.Contains(x));
 
         // Re order favouriteCampaigns to match the config file order
