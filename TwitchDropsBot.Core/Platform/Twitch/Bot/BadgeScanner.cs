@@ -29,7 +29,7 @@ public static class BadgeScanner
     private static DateTime _lastSweepUtc = DateTime.MinValue;
 
     private static readonly Regex WatchRx =
-        new(@"\b(?:watch|support)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        new(@"\b(?:watch|support)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex EarnRx =
         new(@"subscri|gift|purchase|cheer|\bbits\b|\bsub\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex TimeRx =
@@ -528,6 +528,15 @@ public static class BadgeScanner
         if (minutesOfMatch.Success)
         {
             names.Add(minutesOfMatch.Groups[1].Value.Trim());
+        }
+
+        var contentMatch = Regex.Match(
+            description,
+            @"(?:watch|watching)\s+\d+\s+(?:minutes?|hours?)\s+of (?:a |an |the |any )?(.+?)(?: content| stream| streams| category| during|!|\.)",
+            RegexOptions.IgnoreCase);
+        if (contentMatch.Success)
+        {
+            names.Add(contentMatch.Groups[1].Value.Trim());
         }
 
         var bareMatch = Regex.Match(
