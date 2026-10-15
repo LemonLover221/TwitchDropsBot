@@ -14,6 +14,7 @@ public class TwitchHttpService
     {
         twitchDevice = Constant.TwitchDevice;
         HttpClient = new HttpClient();
+        HttpClient.Timeout = TimeSpan.FromSeconds(30);
         var userAgent = twitchDevice.UserAgents[new Random().Next(twitchDevice.UserAgents.Count)];
         if (twitchUser is not null)
         {

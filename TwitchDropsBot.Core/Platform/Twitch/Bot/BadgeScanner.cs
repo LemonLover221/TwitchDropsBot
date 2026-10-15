@@ -23,47 +23,63 @@ public static class BadgeScanner
     private sealed record ScanMatch(DropCampaign? Campaign, bool NotWatchable);
 
     private static readonly Dictionary<string, BadgeState> Cache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object CacheGate = new();
     private static DateTime _lastSweepUtc = DateTime.MinValue;
 
-    private static readonly Regex WatchRx = new(@"\bwatch", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex WatchRx =
+        new(@"\b(?:watch|support)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex EarnRx =
-        new(@"subscri|gift|purchase|cheer|\bbits\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        new(@"subscri|gift|purchase|cheer|\bbits\b|\bsub\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex TimeRx =
         new(@"\d+\s*(?:minute|hour)s?\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    public static async Task<List<DropCampaign>> GetBadgeCampaignsAsync(TwitchGqlRepository repository, ILogger logger)
+    public static List<DropCampaign> GetBadgeCampaigns(TwitchGqlRepository repository, ILogger logger)
     {
+        TryStartSweep(repository, logger);
+
         var campaigns = new List<DropCampaign>();
 
-        try
+        lock (CacheGate)
         {
-            if (!await SweepLock.WaitAsync(TimeSpan.FromSeconds(1)))
+            foreach (var state in Cache.Values)
             {
-                Collect(campaigns);
-                return campaigns;
+                if (state.Campaign != null)
+                {
+                    campaigns.Add(CloneForAccount(state.Campaign));
+                }
+            }
+        }
+
+        return campaigns;
+    }
+
+    private static void TryStartSweep(TwitchGqlRepository repository, ILogger logger)
+    {
+        lock (CacheGate)
+        {
+            if (DateTime.UtcNow - _lastSweepUtc < SweepInterval || !SweepLock.Wait(0))
+            {
+                return;
             }
 
+            _lastSweepUtc = DateTime.UtcNow;
+        }
+
+        _ = Task.Run(async () =>
+        {
             try
             {
-                if (DateTime.UtcNow - _lastSweepUtc >= SweepInterval)
-                {
-                    _lastSweepUtc = DateTime.UtcNow;
-                    await SweepAsync(repository, logger);
-                }
-
-                Collect(campaigns);
+                await SweepAsync(repository, logger);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Badge scan failed");
             }
             finally
             {
                 SweepLock.Release();
             }
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Badge scan failed");
-        }
-
-        return campaigns;
+        });
     }
 
     private static async Task SweepAsync(TwitchGqlRepository repository, ILogger logger)
@@ -97,7 +113,13 @@ public static class BadgeScanner
 
         foreach (var badge in watchBased)
         {
-            if (Cache.TryGetValue(badge.SetId, out var known))
+            BadgeState? known = null;
+            lock (CacheGate)
+            {
+                Cache.TryGetValue(badge.SetId, out known);
+            }
+
+            if (known != null)
             {
                 if (known.Campaign != null)
                 {
@@ -138,13 +160,16 @@ public static class BadgeScanner
                 SweepInterval.TotalSeconds * Math.Pow(2, attempts - 1),
                 TimeSpan.FromHours(24).TotalSeconds);
 
-            Cache[badge.SetId] = new BadgeState
+            lock (CacheGate)
             {
-                Campaign = campaign,
-                NotWatchable = notWatchable,
-                Attempts = attempts,
-                NextAttemptUtc = DateTime.UtcNow.AddSeconds(backoffSeconds)
-            };
+                Cache[badge.SetId] = new BadgeState
+                {
+                    Campaign = campaign,
+                    NotWatchable = notWatchable,
+                    Attempts = attempts,
+                    NextAttemptUtc = DateTime.UtcNow.AddSeconds(backoffSeconds)
+                };
+            }
 
             if (campaign != null)
             {
@@ -503,7 +528,8 @@ public static class BadgeScanner
             names.Add(minutesOfMatch.Groups[1].Value.Trim());
         }
 
-        var bareMatch = Regex.Match(description, @"watching (.+?)(?:[.!?]|$)", RegexOptions.IgnoreCase);
+        var bareMatch = Regex.Match(
+            description, @"(?:watching|supporting) (.+?)(?:[.!?]|$)", RegexOptions.IgnoreCase);
         if (bareMatch.Success)
         {
             var bareName = Regex.Replace(
@@ -550,13 +576,7 @@ public static class BadgeScanner
 
         foreach (var name in parsedNames)
         {
-            queries.Add(name);
-
-            var colonIndex = name.IndexOf(':');
-            if (colonIndex > 0)
-            {
-                queries.Add(name[..colonIndex].Trim());
-            }
+            AddNameVariants(queries, name);
         }
 
         var titleSplit = Regex.Replace(badge.Title, "(?<=[a-z])(?=[A-Z])", " ")
@@ -569,18 +589,37 @@ public static class BadgeScanner
         return queries
             .Where(query => !string.IsNullOrWhiteSpace(query) && query.Length >= 3)
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(6)
+            .Take(10)
             .ToList();
     }
 
-    private static void Collect(List<DropCampaign> into)
+    private static void AddNameVariants(List<string> queries, string name)
     {
-        foreach (var state in Cache.Values)
+        if (string.IsNullOrWhiteSpace(name))
         {
-            if (state.Campaign != null)
-            {
-                into.Add(CloneForAccount(state.Campaign));
-            }
+            return;
+        }
+
+        var cleaned = Regex.Replace(name, @"^(?:the\s+)?(?:\d{4}\s+)?", "", RegexOptions.IgnoreCase).Trim();
+        if (cleaned.Length < 3)
+        {
+            return;
+        }
+
+        queries.Add(cleaned);
+
+        var colonIndex = cleaned.IndexOf(':');
+        var baseName = colonIndex > 0 ? cleaned[..colonIndex].Trim() : cleaned;
+
+        if (!string.Equals(baseName, cleaned, StringComparison.Ordinal) && baseName.Length >= 3)
+        {
+            queries.Add(baseName);
+        }
+
+        var words = baseName.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        for (var keep = words.Length - 1; keep >= 2; keep--)
+        {
+            queries.Add(string.Join(' ', words.Take(keep)));
         }
     }
 

@@ -642,7 +642,15 @@ public class TwitchGqlRepository : BotRepository<TwitchUser>
         {
             try
             {
-                var graphQLResponse = await client.SendQueryAsync<Data>(query);
+                var sendTask = client.SendQueryAsync<Data>(query);
+                var timeoutTask = Task.Delay(TimeSpan.FromSeconds(120));
+
+                if (await Task.WhenAny(sendTask, timeoutTask) != sendTask)
+                {
+                    throw new System.TimeoutException($"The query {name} timed out.");
+                }
+
+                var graphQLResponse = await sendTask;
 
                 if (graphQLResponse.Errors != null)
                 {

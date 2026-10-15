@@ -135,7 +135,7 @@ public class TwitchBot : BaseBot<TwitchUser>
 
         if (TwitchSettings.PrioritizeBadges)
         {
-            var badgeCampaigns = await BadgeScanner.GetBadgeCampaignsAsync(BotUser.TwitchRepository, Logger);
+            var badgeCampaigns = BadgeScanner.GetBadgeCampaigns(BotUser.TwitchRepository, Logger);
             var known = new HashSet<string>(
                 thingsToWatch.Select(campaign => campaign.Id), StringComparer.OrdinalIgnoreCase);
             var injected = 0;
