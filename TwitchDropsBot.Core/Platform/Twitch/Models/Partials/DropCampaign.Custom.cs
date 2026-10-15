@@ -42,11 +42,14 @@ public partial class DropCampaign : AbstractCampaign
                         return response;
                     }
 
-                    if (benefitEdge.Benefit.DistributionType == DistributionType.BADGE)
+                    if (benefitEdge.Benefit.DistributionType == DistributionType.BADGE || BadgeScanDiscovered)
                     {
                         List<string> badges = new List<string>() {timeBasedDrop.Name, benefitEdge.Benefit.Name};
                         var response = await repository.HaveBadge(badges);
-                        return response;
+                        if (response)
+                        {
+                            return true;
+                        }
                     }
                     
                     var correspondingDrop = inventory.GameEventDropsConnection?

@@ -213,6 +213,7 @@ public class TwitchGqlRepository : BotRepository<TwitchUser>
         var badges = new List<GlobalBadge>();
 
         using var client = new HttpClient();
+        client.Timeout = TimeSpan.FromSeconds(30);
         using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.twitch.tv/helix/chat/badges/global");
         request.Headers.Add("Client-Id", twitchDevice.ClientID);
         request.Headers.Add("Authorization", "Bearer " + BotUser.ClientSecret);
@@ -248,6 +249,7 @@ public class TwitchGqlRepository : BotRepository<TwitchUser>
         var games = new List<Game>();
 
         using var client = new HttpClient();
+        client.Timeout = TimeSpan.FromSeconds(30);
         using var request = new HttpRequestMessage(HttpMethod.Get,
             $"https://api.twitch.tv/helix/search/categories?query={Uri.EscapeDataString(query)}&first={first}");
         request.Headers.Add("Client-Id", twitchDevice.ClientID);
@@ -419,6 +421,55 @@ public class TwitchGqlRepository : BotRepository<TwitchUser>
         return channelDropCampaignsProgress;
     }
 
+    private DateTime _ownedBadgesFetchedUtc = DateTime.MinValue;
+    private HashSet<string>? _ownedBadgeSetIds;
+
+    public async Task<HashSet<string>> FetchOwnedBadgeSetIdsAsync()
+    {
+        if (_ownedBadgeSetIds is not null
+            && DateTime.UtcNow - _ownedBadgesFetchedUtc < TimeSpan.FromMinutes(30))
+        {
+            return _ownedBadgeSetIds;
+        }
+
+        var owned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var query = CreateQuery("PokemonOwnedBadges");
+        dynamic? resp = await DoGQLRequestAsync(query);
+
+        List<Badge> badges = resp?.Data.CurrentUser.AvailableBadges ?? new List<Badge>();
+        foreach (var badge in badges)
+        {
+            var normalized = NormalizeBadgeId(badge.SetId ?? badge.Title ?? string.Empty);
+            if (normalized.Length > 0)
+            {
+                owned.Add(normalized);
+            }
+        }
+
+        _ownedBadgesFetchedUtc = DateTime.UtcNow;
+        _ownedBadgeSetIds = owned;
+
+        return owned;
+    }
+
+    private static string NormalizeBadgeId(string value) =>
+        new(value.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+
+    public async Task<bool> HaveBadge(List<string> BadgeNames)
+    {
+        var owned = await FetchOwnedBadgeSetIdsAsync();
+
+        foreach (var name in BadgeNames)
+        {
+            if (owned.Contains(NormalizeBadgeId(name ?? string.Empty)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public async Task<JsonElement?> FetchAvailableDropsRawAsync(string channelId)
     {
         var query = CreateQuery("DropsHighlightService_AvailableDrops");
@@ -565,35 +616,6 @@ public class TwitchGqlRepository : BotRepository<TwitchUser>
         RewardCampaignCode rewardCampaignCode = resp.Data.CurrentUser.Inventory.RewardValue;
 
         return rewardCampaignCode;
-    }
-
-    public async Task<bool> HaveBadge(List<string> BadgeNames)
-    {
-        var query = CreateQuery("ChatSettings_Badges");
-
-        if (query.Variables is Dictionary<string, object?> variables)
-        {
-            variables["channelLogin"] = BotUser.Login;
-        }
-
-        dynamic? resp = await DoGQLRequestAsync(query);
-
-        List<Badge> badges = resp.Data.CurrentUser.AvailableBadges;
-
-        foreach (var badge in badges)
-        {
-            foreach (var badgeName in BadgeNames)
-            {
-                var fuzzed = Fuzz.PartialRatio(badgeName.ToLower(), badge.Title.ToLower());
-                // _logger.LogDebug($"{badgeName} - {badge.Title} = {fuzzed}");
-                if (fuzzed >= 80)
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
     }
 
     public async Task<bool> HaveEmote(List<string> emoteNames)

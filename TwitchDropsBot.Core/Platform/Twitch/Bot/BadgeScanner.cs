@@ -9,6 +9,8 @@ namespace TwitchDropsBot.Core.Platform.Twitch.Bot;
 
 public static class BadgeScanner
 {
+    public sealed record BadgeCampaign(DropCampaign Campaign, string SetId);
+
     private static readonly TimeSpan SweepInterval = TimeSpan.FromHours(1);
     private static readonly SemaphoreSlim SweepLock = new(1, 1);
 
@@ -33,19 +35,19 @@ public static class BadgeScanner
     private static readonly Regex TimeRx =
         new(@"\d+\s*(?:minute|hour)s?\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    public static List<DropCampaign> GetBadgeCampaigns(TwitchGqlRepository repository, ILogger logger)
+    public static List<BadgeCampaign> GetBadgeCampaigns(TwitchGqlRepository repository, ILogger logger)
     {
         TryStartSweep(repository, logger);
 
-        var campaigns = new List<DropCampaign>();
+        var campaigns = new List<BadgeCampaign>();
 
         lock (CacheGate)
         {
-            foreach (var state in Cache.Values)
+            foreach (var (setId, state) in Cache)
             {
                 if (state.Campaign != null)
                 {
-                    campaigns.Add(CloneForAccount(state.Campaign));
+                    campaigns.Add(new BadgeCampaign(CloneForAccount(state.Campaign), setId));
                 }
             }
         }
@@ -623,7 +625,7 @@ public static class BadgeScanner
         }
     }
 
-    private static string Normalize(string value) =>
+    public static string Normalize(string value) =>
         new(value.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
 
     private static DropCampaign CloneForAccount(DropCampaign campaign) => new()

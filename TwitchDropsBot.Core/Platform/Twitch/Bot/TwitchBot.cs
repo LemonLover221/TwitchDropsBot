@@ -82,6 +82,41 @@ public class TwitchBot : BaseBot<TwitchUser>
 
         await CheckForClaim(inventory);
 
+        if (TwitchSettings.PrioritizeBadges)
+        {
+            var ownedBadges = await BotUser.TwitchRepository.FetchOwnedBadgeSetIdsAsync();
+            var badgeCampaigns = BadgeScanner.GetBadgeCampaigns(BotUser.TwitchRepository, Logger);
+            var known = new HashSet<string>(
+                thingsToWatch.Select(campaign => campaign.Id), StringComparer.OrdinalIgnoreCase);
+            var injected = 0;
+
+            foreach (var badgeCampaign in badgeCampaigns)
+            {
+                if (ownedBadges.Contains(BadgeScanner.Normalize(badgeCampaign.SetId)))
+                {
+                    Logger.LogInformation(
+                        "Badge scan skipping '{SetId}': account already owns the badge.", badgeCampaign.SetId);
+                    continue;
+                }
+
+                var scannedCampaign = badgeCampaign.Campaign;
+                if (known.Contains(scannedCampaign.Id) || finishedCampaigns.Contains(scannedCampaign))
+                {
+                    continue;
+                }
+
+                thingsToWatch.Insert(0, scannedCampaign);
+                known.Add(scannedCampaign.Id);
+                injected++;
+            }
+
+            if (injected > 0)
+            {
+                Logger.LogInformation(
+                    "Badge scan injected {Count} campaign(s) discovered from the global badge catalog.", injected);
+            }
+        }
+
         if (thingsToWatch.Count == 0)
         {
             throw new NoBroadcasterOrNoCampaignLeft();
@@ -90,13 +125,15 @@ public class TwitchBot : BaseBot<TwitchUser>
         if (BotUser.OnlyConnectedAccounts)
         {
             thingsToWatch.RemoveAll(x =>
-                x is DropCampaign dropCampaign && !dropCampaign.Self.IsAccountConnected &&
+                x is DropCampaign { BadgeScanDiscovered: false } dropCampaign &&
+                !dropCampaign.Self.IsAccountConnected &&
                 dropCampaign.AccountLinkURL != "https://twitch.tv/");
         }
 
         if (BotUser.OnlyFavouriteGames)
         {
-            thingsToWatch.RemoveAll(x => !x.Game?.IsFavorite ?? false);
+            thingsToWatch.RemoveAll(x =>
+                x is not DropCampaign { BadgeScanDiscovered: true } && (!x.Game?.IsFavorite ?? false));
         }
 
         // Assuming you have a list of favorite game names
@@ -132,32 +169,6 @@ public class TwitchBot : BaseBot<TwitchUser>
         // End custom sort
 
         thingsToWatch = favouriteCampaigns.Concat(thingsToWatch).ToList();
-
-        if (TwitchSettings.PrioritizeBadges)
-        {
-            var badgeCampaigns = BadgeScanner.GetBadgeCampaigns(BotUser.TwitchRepository, Logger);
-            var known = new HashSet<string>(
-                thingsToWatch.Select(campaign => campaign.Id), StringComparer.OrdinalIgnoreCase);
-            var injected = 0;
-
-            foreach (var badgeCampaign in badgeCampaigns)
-            {
-                if (known.Contains(badgeCampaign.Id) || finishedCampaigns.Contains(badgeCampaign))
-                {
-                    continue;
-                }
-
-                thingsToWatch.Insert(0, badgeCampaign);
-                known.Add(badgeCampaign.Id);
-                injected++;
-            }
-
-            if (injected > 0)
-            {
-                Logger.LogInformation(
-                    "Badge scan injected {Count} campaign(s) discovered from the global badge catalog.", injected);
-            }
-        }
 
         TimeBasedDrop? timeBasedDrop = null;
         DropCurrentSession? dropCurrentSession = null;
