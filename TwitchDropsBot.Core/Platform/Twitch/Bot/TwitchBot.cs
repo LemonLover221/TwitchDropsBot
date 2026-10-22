@@ -405,6 +405,7 @@ public class TwitchBot : BaseBot<TwitchUser>
 
             campaign.BadgeScanDiscovered = true;
             campaign.InventoryDiscovered = true;
+            campaign.Game.DisplayName ??= campaign.Game.Name;
             campaign.ScanTier = BadgeScanner.ComputeScanTier(campaign);
             thingsToWatch.Insert(0, campaign);
             known.Add(campaign.Id);

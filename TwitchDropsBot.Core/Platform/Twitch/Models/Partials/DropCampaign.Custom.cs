@@ -12,6 +12,10 @@ public partial class DropCampaign : AbstractCampaign
 
     public override async Task<bool> IsCompleted(Inventory inventory, TwitchGqlRepository repository)
     {
+        if (BlindWatch is not null)
+        {
+            return false;
+        }
 
         var dropsCampaignInProgress = inventory.DropCampaignsInProgress.FirstOrDefault(x => x.Id == Id);
         
