@@ -20,9 +20,16 @@ public static class BadgeScanner
         public bool NotWatchable;
         public DateTime NextAttemptUtc;
         public int Attempts;
+        public string? Title;
+        public List<string> Slugs = new();
     }
 
-    private sealed record ScanMatch(DropCampaign? Campaign, bool NotWatchable);
+    private sealed record ScanMatch(DropCampaign? Campaign, bool NotWatchable, List<string>? ResolvedSlugs = null);
+
+    public sealed record BlindWatchCandidate(string SetId, string Title, string Slug);
+
+    private static readonly Dictionary<string, Dictionary<string, (DateTime NextAttemptUtc, int Attempts)>> BlindWatchState =
+        new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly Dictionary<string, BadgeState> Cache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, DropCampaign> Harvested = new(StringComparer.OrdinalIgnoreCase);
@@ -160,12 +167,14 @@ public static class BadgeScanner
             DropCampaign? campaign = null;
             var notWatchable = false;
             string? failure = null;
+            List<string>? resolvedSlugs = null;
 
             try
             {
                 var match = await ResolveBadgeAsync(badge, repository);
                 campaign = match.Campaign;
                 notWatchable = match.NotWatchable;
+                resolvedSlugs = match.ResolvedSlugs;
             }
             catch (Exception ex)
             {
@@ -179,12 +188,23 @@ public static class BadgeScanner
 
             lock (CacheGate)
             {
+                var slugs = known?.Slugs ?? new List<string>();
+                foreach (var slug in resolvedSlugs ?? new List<string>())
+                {
+                    if (!slugs.Contains(slug, StringComparer.OrdinalIgnoreCase))
+                    {
+                        slugs.Add(slug);
+                    }
+                }
+
                 Cache[badge.SetId] = new BadgeState
                 {
                     Campaign = campaign,
                     NotWatchable = notWatchable,
                     Attempts = attempts,
-                    NextAttemptUtc = DateTime.UtcNow.AddSeconds(backoffSeconds)
+                    NextAttemptUtc = DateTime.UtcNow.AddSeconds(backoffSeconds),
+                    Title = badge.Title,
+                    Slugs = slugs
                 };
             }
 
@@ -276,6 +296,7 @@ public static class BadgeScanner
         }
 
         var candidateNames = ExtractCategoryNames(badge.Description);
+        var resolvedSlugs = new List<string>();
 
         foreach (var query in BuildSearchQueries(badge, candidateNames))
         {
@@ -306,14 +327,15 @@ public static class BadgeScanner
                 continue;
             }
 
+            resolvedSlugs.Add(slugGame!.Slug!);
             var categoryMatch = await TryResolveViaCategoryAsync(slugGame!.Slug!, badge, repository);
             if (categoryMatch.Campaign != null || categoryMatch.NotWatchable)
             {
-                return categoryMatch;
+                return new ScanMatch(categoryMatch.Campaign, categoryMatch.NotWatchable, resolvedSlugs);
             }
         }
 
-        return new ScanMatch(null, false);
+        return new ScanMatch(null, false, resolvedSlugs);
     }
 
     private static async Task<ScanMatch> TryResolveViaChannelAsync(
@@ -500,7 +522,7 @@ public static class BadgeScanner
         }
     }
 
-    private static int ComputeScanTier(DropCampaign campaign)
+    public static int ComputeScanTier(DropCampaign campaign)
     {
         foreach (var drop in campaign.TimeBasedDrops)
         {
@@ -808,6 +830,63 @@ public static class BadgeScanner
 
     public static string Normalize(string value) =>
         new(value.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+
+    public static BlindWatchCandidate? GetBlindWatchCandidate(
+        string login, HashSet<string> ownedSetIds, HashSet<string> busyNames)
+    {
+        lock (CacheGate)
+        {
+            if (!BlindWatchState.TryGetValue(login, out var accountState))
+            {
+                accountState = new Dictionary<string, (DateTime, int)>(StringComparer.OrdinalIgnoreCase);
+                BlindWatchState[login] = accountState;
+            }
+
+            var now = DateTime.UtcNow;
+
+            foreach (var (setId, state) in Cache)
+            {
+                if (state.Campaign is not null || state.NotWatchable || state.Slugs.Count == 0)
+                {
+                    continue;
+                }
+
+                var normalized = Normalize(setId);
+                if (ownedSetIds.Contains(normalized) || busyNames.Contains(normalized))
+                {
+                    continue;
+                }
+
+                if (accountState.TryGetValue(setId, out var watch) && now < watch.NextAttemptUtc)
+                {
+                    continue;
+                }
+
+                return new BlindWatchCandidate(setId, state.Title ?? setId, state.Slugs[0]);
+            }
+
+            return null;
+        }
+    }
+
+    public static void RecordBlindWatch(string login, string setId)
+    {
+        lock (CacheGate)
+        {
+            if (!BlindWatchState.TryGetValue(login, out var accountState))
+            {
+                accountState = new Dictionary<string, (DateTime, int)>(StringComparer.OrdinalIgnoreCase);
+                BlindWatchState[login] = accountState;
+            }
+
+            accountState.TryGetValue(setId, out var watch);
+            var attempts = watch.Item2 + 1;
+            var backoffSeconds = Math.Min(
+                SweepInterval.TotalSeconds * Math.Pow(2, attempts - 1),
+                TimeSpan.FromHours(24).TotalSeconds);
+            accountState[setId] = (DateTime.UtcNow.AddSeconds(backoffSeconds), attempts);
+        }
+    }
 
     private static DropCampaign CloneForAccount(DropCampaign campaign) => new()
     {

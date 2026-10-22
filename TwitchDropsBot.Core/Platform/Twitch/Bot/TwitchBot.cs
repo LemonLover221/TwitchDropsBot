@@ -117,6 +117,9 @@ public class TwitchBot : BaseBot<TwitchUser>
                 Logger.LogInformation(
                     "Badge scan injected {Count} campaign(s) discovered from the global badge catalog.", injected);
             }
+
+            InjectInventoryCampaigns(thingsToWatch, inventory, known);
+            await InjectBlindWatchKickstartAsync(thingsToWatch, ownedBadges);
         }
 
         if (thingsToWatch.Count == 0)
@@ -245,46 +248,85 @@ public class TwitchBot : BaseBot<TwitchUser>
                 timeBasedDrop = campaign.FindTimeBasedDrop(dropCurrentSession.DropId);
             */
 
-            dropCurrentRewardGroup = await CheckDropProgress(broadcaster, campaign);
-
-            if (dropCurrentRewardGroup is null)
+            if (campaign is DropCampaign { BlindWatch: { } blindWatchInfo })
             {
+                await BlindWatchAsync(broadcaster, campaign, blindWatchInfo);
                 thingsToWatch.Remove(campaign);
                 continue;
             }
 
-            if (dropCurrentRewardGroup.Self.CurrentMinutesWatched >
-                dropCurrentRewardGroup.ProgressCriteria.Requirements.MinutesWatched)
+            if (campaign is DropCampaign { InventoryDiscovered: true })
             {
-                Logger.LogInformation("CurrentMinutesWatched > requiredMinutesWatched, skipping");
-                thingsToWatch.Remove(campaign);
-                continue;
-            }
+                dropCurrentSession = await CheckDropCurrentSession(broadcaster, campaign);
 
-            if (string.IsNullOrEmpty(dropCurrentRewardGroup.Id))
+                if (dropCurrentSession is null
+                    || dropCurrentSession.CurrentMinutesWatched > dropCurrentSession.RequiredMinutesWatched
+                    || string.IsNullOrEmpty(dropCurrentSession.DropId))
+                {
+                    thingsToWatch.Remove(campaign);
+                    continue;
+                }
+
+                if (dropCurrentSession.Channel?.Id != broadcaster.Id)
+                {
+                    dropCurrentSession = await BotUser.TwitchRepository.FetchCurrentSessionContextAsync(broadcaster);
+                    if (dropCurrentSession is null || string.IsNullOrEmpty(dropCurrentSession.DropId))
+                    {
+                        thingsToWatch.Remove(campaign);
+                        continue;
+                    }
+                }
+
+                timeBasedDrop = campaign.FindTimeBasedDrop(dropCurrentSession.DropId);
+
+                if (timeBasedDrop is not null)
+                {
+                    Logger.LogInformation($"Time based drops : {timeBasedDrop.Name}");
+                }
+            }
+            else
             {
-                Logger.LogInformation("DropId is null or empty, skipping");
-                thingsToWatch.Remove(campaign);
-                continue;
-            }
+                dropCurrentRewardGroup = await CheckDropProgress(broadcaster, campaign);
 
-            timeBasedDrop = campaign.FindTimeBasedDrop(dropCurrentRewardGroup.Id);
+                if (dropCurrentRewardGroup is null)
+                {
+                    thingsToWatch.Remove(campaign);
+                    continue;
+                }
 
-            if (timeBasedDrop is null
-                && campaign is not RewardCampaign
-                && campaign is not DropCampaign { BadgeScanDiscovered: true })
-            {
-                Logger.LogInformation("Time based drop not found, skipping");
-                thingsToWatch.Remove(campaign);
-                continue;
-            }
+                if (dropCurrentRewardGroup.Self.CurrentMinutesWatched >
+                    dropCurrentRewardGroup.ProgressCriteria.Requirements.MinutesWatched)
+                {
+                    Logger.LogInformation("CurrentMinutesWatched > requiredMinutesWatched, skipping");
+                    thingsToWatch.Remove(campaign);
+                    continue;
+                }
 
-            if (timeBasedDrop is not null)
-            {
-                Logger.LogInformation($"Time based drops : {timeBasedDrop.Name}");
+                if (string.IsNullOrEmpty(dropCurrentRewardGroup.Id))
+                {
+                    Logger.LogInformation("DropId is null or empty, skipping");
+                    thingsToWatch.Remove(campaign);
+                    continue;
+                }
+
+                timeBasedDrop = campaign.FindTimeBasedDrop(dropCurrentRewardGroup.Id);
+
+                if (timeBasedDrop is null
+                    && campaign is not RewardCampaign
+                    && campaign is not DropCampaign { BadgeScanDiscovered: true })
+                {
+                    Logger.LogInformation("Time based drop not found, skipping");
+                    thingsToWatch.Remove(campaign);
+                    continue;
+                }
+
+                if (timeBasedDrop is not null)
+                {
+                    Logger.LogInformation($"Time based drops : {timeBasedDrop.Name}");
+                }
             }
-            // } while (timeBasedDrop is null || dropCurrentSession is null || broadcaster is null || campaign is null);
-        } while (dropCurrentRewardGroup is null || broadcaster is null || campaign is null);
+        } while ((dropCurrentRewardGroup is null && dropCurrentSession is null)
+                 || broadcaster is null || campaign is null);
 
 
         BotUser.CurrentTimeBasedDrop = timeBasedDrop;
@@ -295,7 +337,14 @@ public class TwitchBot : BaseBot<TwitchUser>
         BotUser.Status = BotStatus.Watching;
         Logger.LogInformation(
             $"Current drop campaign: {campaign.Name} ({campaign.Game?.DisplayName}), watching {broadcaster.Login} | {broadcaster.Id}");
-        await WatchStreamAsync(broadcaster, dropCurrentRewardGroup, campaign);
+        if (dropCurrentSession is not null)
+        {
+            await WatchStreamAsync(broadcaster, dropCurrentSession, campaign);
+        }
+        else
+        {
+            await WatchStreamAsync(broadcaster, dropCurrentRewardGroup!, campaign);
+        }
 
         Logger.LogDebug("Loop ended");
     }
@@ -320,6 +369,165 @@ public class TwitchBot : BaseBot<TwitchUser>
         }
 
         return dropCurrentSession;
+    }
+
+    private void InjectInventoryCampaigns(List<AbstractCampaign> thingsToWatch, Inventory? inventory,
+        HashSet<string> known)
+    {
+        if (inventory?.DropCampaignsInProgress is null)
+        {
+            return;
+        }
+
+        var injected = 0;
+
+        foreach (var campaign in inventory.DropCampaignsInProgress)
+        {
+            if (known.Contains(campaign.Id) || finishedCampaigns.Contains(campaign))
+            {
+                continue;
+            }
+
+            if (!string.Equals(campaign.Status, "ACTIVE", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var watchable = campaign.TimeBasedDrops?.Any(drop =>
+                drop.RequiredMinutesWatched > 0
+                && drop.Self?.IsClaimed != true
+                && (drop.Self?.CurrentMinutesWatched ?? 0) < drop.RequiredMinutesWatched) == true;
+
+            if (!watchable || campaign.Game is null || string.IsNullOrEmpty(campaign.Game.Slug))
+            {
+                continue;
+            }
+
+            campaign.BadgeScanDiscovered = true;
+            campaign.InventoryDiscovered = true;
+            campaign.ScanTier = BadgeScanner.ComputeScanTier(campaign);
+            thingsToWatch.Insert(0, campaign);
+            known.Add(campaign.Id);
+            injected++;
+        }
+
+        if (injected > 0)
+        {
+            Logger.LogInformation(
+                "Inventory scan injected {Count} active campaign(s) with progress ({Names}).",
+                injected, string.Join(", ", thingsToWatch
+                    .Where(x => x is DropCampaign { InventoryDiscovered: true })
+                    .Select(x => x.Name)));
+        }
+    }
+
+    private async Task InjectBlindWatchKickstartAsync(List<AbstractCampaign> thingsToWatch,
+        HashSet<string> ownedBadges)
+    {
+        if (thingsToWatch.Any(x => CampaignRewardPriority.GetRewardTier(x) == CampaignRewardPriority.BadgeTier))
+        {
+            return;
+        }
+
+        var busyNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var campaign in thingsToWatch.Where(x => x is DropCampaign { InventoryDiscovered: true }))
+        {
+            foreach (var drop in campaign.TimeBasedDrops)
+            {
+                if (!string.IsNullOrEmpty(drop.Name))
+                {
+                    busyNames.Add(BadgeScanner.Normalize(drop.Name!));
+                }
+
+                foreach (var edge in drop.BenefitEdges ?? new List<DropBenefitEdge>())
+                {
+                    if (!string.IsNullOrEmpty(edge.Benefit?.Name))
+                    {
+                        busyNames.Add(BadgeScanner.Normalize(edge.Benefit.Name!));
+                    }
+                }
+            }
+        }
+
+        var candidate = BadgeScanner.GetBlindWatchCandidate(BotUser.Login, ownedBadges, busyNames);
+        if (candidate is null)
+        {
+            return;
+        }
+
+        var game = await BotUser.TwitchRepository.FetchDirectoryPageGameAsync(candidate.Slug, true);
+        if (game?.Streams?.Edges is not { Count: > 0 })
+        {
+            BadgeScanner.RecordBlindWatch(BotUser.Login, candidate.SetId);
+            Logger.LogInformation(
+                "Badge scan: no live drops-enabled channel in '{Slug}' to watch for badge '{Title}'.",
+                candidate.Slug, candidate.Title);
+            return;
+        }
+
+        var pseudo = new DropCampaign
+        {
+            Id = $"blind-watch:{candidate.Slug}",
+            Name = $"Badge blind watch: {candidate.Title}",
+            Status = "ACTIVE",
+            Game = new Game
+            {
+                Id = game.Id,
+                Name = game.Name,
+                DisplayName = game.DisplayName ?? game.Name,
+                Slug = candidate.Slug,
+                BoxArtUrl = game.BoxArtUrl
+            },
+            BadgeScanDiscovered = true,
+            ScanTier = CampaignRewardPriority.BadgeTier,
+            BlindWatch = new DropCampaign.BlindWatchInfo(candidate.SetId, candidate.Title, candidate.Slug, 10),
+            TimeBasedDrops = new List<TimeBasedDrop>
+            {
+                new()
+                {
+                    Id = "blind-watch",
+                    Name = candidate.Title,
+                    RequiredMinutesWatched = 10
+                }
+            }
+        };
+        thingsToWatch.Insert(0, pseudo);
+        Logger.LogInformation(
+            "Badge scan: watching '{Slug}' for {Minutes} minutes to surface the hidden campaign for badge '{Title}'.",
+            candidate.Slug, pseudo.BlindWatch!.Minutes, candidate.Title);
+    }
+
+    private async Task BlindWatchAsync(User broadcaster, AbstractCampaign campaign,
+        DropCampaign.BlindWatchInfo info)
+    {
+        Logger.LogInformation(
+            "Blind-watching {Login} in '{Slug}' for badge '{Title}' ({Minutes} min)...",
+            broadcaster.Login, info.Slug, info.Title, info.Minutes);
+
+        BotUser.CurrentCampaign = campaign;
+        BotUser.CurrentBroadcaster = broadcaster;
+        BotUser.Status = BotStatus.Watching;
+
+        var startedAt = DateTime.UtcNow;
+
+        try
+        {
+            while ((DateTime.UtcNow - startedAt).TotalMinutes < info.Minutes)
+            {
+                await BotUser.WatchManager.WatchStreamAsync(broadcaster, campaign.Game);
+                await Task.Delay(TimeSpan.FromSeconds(55),
+                    BotUser.CancellationTokenSource?.Token ?? System.Threading.CancellationToken.None);
+            }
+        }
+        finally
+        {
+            BotUser.WatchManager.Close();
+        }
+
+        BadgeScanner.RecordBlindWatch(BotUser.Login, info.SetId);
+        Logger.LogInformation(
+            "Blind watch of '{Slug}' done, hidden campaign (if any) surfaces via the inventory next cycle.",
+            info.Slug);
     }
 
     private async Task<DropsCampaign?> FetchCampaignProgress(User broadcaster, AbstractCampaign campaign)
@@ -895,7 +1103,10 @@ public class TwitchBot : BaseBot<TwitchUser>
         // For every timebased drop, check if it is claimed
         foreach (var dropCampaignInProgress in inventory.DropCampaignsInProgress)
         {
-            if (dropCampaignInProgress.Self is not null && !dropCampaignInProgress.Self.IsAccountConnected)
+            if (dropCampaignInProgress.Self is not null
+                && !dropCampaignInProgress.Self.IsAccountConnected
+                && dropCampaignInProgress.TimeBasedDrops.All(drop =>
+                    drop.BenefitEdges?.Any(edge => edge.Benefit?.DistributionType == DistributionType.BADGE) != true))
             {
                 continue;
             }
