@@ -430,28 +430,95 @@ public class TwitchBot : BaseBot<TwitchUser>
         }
 
         var busyNames = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var campaign in thingsToWatch.Where(x => x is DropCampaign { InventoryDiscovered: true }))
+        foreach (var campaign in thingsToWatch)
         {
-            foreach (var drop in campaign.TimeBasedDrops)
+            if (campaign is DropCampaign { InventoryDiscovered: true })
             {
-                if (!string.IsNullOrEmpty(drop.Name))
+                foreach (var drop in campaign.TimeBasedDrops)
                 {
-                    busyNames.Add(BadgeScanner.Normalize(drop.Name!));
-                }
-
-                foreach (var edge in drop.BenefitEdges ?? new List<DropBenefitEdge>())
-                {
-                    if (!string.IsNullOrEmpty(edge.Benefit?.Name))
+                    if (!string.IsNullOrEmpty(drop.Name))
                     {
-                        busyNames.Add(BadgeScanner.Normalize(edge.Benefit.Name!));
+                        busyNames.Add(BadgeScanner.Normalize(drop.Name!));
+                    }
+
+                    foreach (var edge in drop.BenefitEdges ?? new List<DropBenefitEdge>())
+                    {
+                        if (!string.IsNullOrEmpty(edge.Benefit?.Name))
+                        {
+                            busyNames.Add(BadgeScanner.Normalize(edge.Benefit.Name!));
+                        }
+                    }
+                }
+            }
+            else if (campaign is RewardCampaign rewardCampaign)
+            {
+                foreach (var reward in rewardCampaign.Rewards ?? new List<Reward>())
+                {
+                    if (!string.IsNullOrEmpty(reward.Name))
+                    {
+                        busyNames.Add(BadgeScanner.Normalize(reward.Name!));
                     }
                 }
             }
         }
 
-        var candidate = BadgeScanner.GetBlindWatchCandidate(BotUser.Login, ownedBadges, busyNames);
+        var candidate = await BadgeScanner.GetBlindWatchCandidateAsync(BotUser.Login, ownedBadges, busyNames);
         if (candidate is null)
         {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(candidate.Slug))
+        {
+            if (string.IsNullOrEmpty(candidate.ChannelLogin))
+            {
+                return;
+            }
+
+            var user = await BotUser.TwitchRepository.FetchStreamInformationAsync(candidate.ChannelLogin);
+            if (user is null || !user.IsLive() || user.BroadcastSettings?.Game is null)
+            {
+                BadgeScanner.RecordBlindWatch(BotUser.Login, candidate.SetId);
+                Logger.LogInformation(
+                    "Badge scan: channel '{Channel}' is not live, cannot blind-watch for badge '{Title}'.",
+                    candidate.ChannelLogin, candidate.Title);
+                return;
+            }
+
+            var broadcastGame = user.BroadcastSettings!.Game!;
+            var pseudo = new DropCampaign
+            {
+                Id = $"blind-watch:{candidate.SetId}",
+                Name = $"Badge blind watch: {candidate.Title}",
+                Status = "ACTIVE",
+                Game = new Game
+                {
+                    Id = broadcastGame.Id,
+                    Name = broadcastGame.Name,
+                    DisplayName = broadcastGame.DisplayName ?? broadcastGame.Name
+                },
+                Allow = new DropCampaignACL
+                {
+                    Channels = new List<Channel> { new() { Name = candidate.ChannelLogin } }
+                },
+                BadgeScanDiscovered = true,
+                ScanTier = CampaignRewardPriority.BadgeTier,
+                BlindWatch = new DropCampaign.BlindWatchInfo(
+                    candidate.SetId, candidate.Title, candidate.ChannelLogin!, 10),
+                TimeBasedDrops = new List<TimeBasedDrop>
+                {
+                    new()
+                    {
+                        Id = "blind-watch",
+                        Name = candidate.Title,
+                        RequiredMinutesWatched = 10
+                    }
+                }
+            };
+            thingsToWatch.Insert(0, pseudo);
+            Logger.LogInformation(
+                "Badge scan: watching '{Channel}' for {Minutes} minutes to surface the hidden campaign for badge '{Title}'.",
+                candidate.ChannelLogin, 10, candidate.Title);
             return;
         }
 
@@ -465,7 +532,7 @@ public class TwitchBot : BaseBot<TwitchUser>
             return;
         }
 
-        var pseudo = new DropCampaign
+        var categoryPseudo = new DropCampaign
         {
             Id = $"blind-watch:{candidate.Slug}",
             Name = $"Badge blind watch: {candidate.Title}",
@@ -491,18 +558,18 @@ public class TwitchBot : BaseBot<TwitchUser>
                 }
             }
         };
-        thingsToWatch.Insert(0, pseudo);
+        thingsToWatch.Insert(0, categoryPseudo);
         Logger.LogInformation(
             "Badge scan: watching '{Slug}' for {Minutes} minutes to surface the hidden campaign for badge '{Title}'.",
-            candidate.Slug, pseudo.BlindWatch!.Minutes, candidate.Title);
+            candidate.Slug, 10, candidate.Title);
     }
 
     private async Task BlindWatchAsync(User broadcaster, AbstractCampaign campaign,
         DropCampaign.BlindWatchInfo info)
     {
         Logger.LogInformation(
-            "Blind-watching {Login} in '{Slug}' for badge '{Title}' ({Minutes} min)...",
-            broadcaster.Login, info.Slug, info.Title, info.Minutes);
+            "Blind-watching {Login} for badge '{Title}' ({Minutes} min)...",
+            broadcaster.Login, info.Title, info.Minutes);
 
         BotUser.CurrentCampaign = campaign;
         BotUser.CurrentBroadcaster = broadcaster;
@@ -526,8 +593,8 @@ public class TwitchBot : BaseBot<TwitchUser>
 
         BadgeScanner.RecordBlindWatch(BotUser.Login, info.SetId);
         Logger.LogInformation(
-            "Blind watch of '{Slug}' done, hidden campaign (if any) surfaces via the inventory next cycle.",
-            info.Slug);
+            "Blind watch for badge '{Title}' done, hidden campaign (if any) surfaces via the inventory next cycle.",
+            info.Title);
     }
 
     private async Task<DropsCampaign?> FetchCampaignProgress(User broadcaster, AbstractCampaign campaign)

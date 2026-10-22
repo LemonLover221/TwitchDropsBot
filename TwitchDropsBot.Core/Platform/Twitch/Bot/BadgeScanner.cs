@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net.Http;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
@@ -11,8 +12,16 @@ public static class BadgeScanner
 {
     public sealed record BadgeCampaign(DropCampaign Campaign, string SetId);
 
+    public sealed record EventBadge(string SetId, string Name, DateTime StartAt, DateTime EndAt);
+
     private static readonly TimeSpan SweepInterval = TimeSpan.FromHours(1);
     private static readonly SemaphoreSlim SweepLock = new(1, 1);
+
+    private static readonly HttpClient EventHttp = new();
+    private static List<EventBadge>? _eventBadges;
+    private static DateTime _eventsNextFetchUtc = DateTime.MinValue;
+    private static readonly TimeSpan EventFetchInterval = TimeSpan.FromHours(1);
+    private static readonly TimeSpan EventRetryInterval = TimeSpan.FromMinutes(5);
 
     private sealed class BadgeState
     {
@@ -22,11 +31,12 @@ public static class BadgeScanner
         public int Attempts;
         public string? Title;
         public List<string> Slugs = new();
+        public List<string> Channels = new();
     }
 
     private sealed record ScanMatch(DropCampaign? Campaign, bool NotWatchable, List<string>? ResolvedSlugs = null);
 
-    public sealed record BlindWatchCandidate(string SetId, string Title, string Slug);
+    public sealed record BlindWatchCandidate(string SetId, string Title, string Slug, string? ChannelLogin);
 
     private static readonly Dictionary<string, Dictionary<string, (DateTime NextAttemptUtc, int Attempts)>> BlindWatchState =
         new(StringComparer.OrdinalIgnoreCase);
@@ -115,11 +125,28 @@ public static class BadgeScanner
             return;
         }
 
+        var events = await FetchEventBadgesAsync();
+        HashSet<string>? activeSet = null;
+        if (events is not null)
+        {
+            var now = DateTime.UtcNow;
+            activeSet = events
+                .Where(e => e.StartAt <= now && e.EndAt > now)
+                .Select(e => Normalize(e.SetId))
+                .ToHashSet(StringComparer.Ordinal);
+            logger.LogInformation("Badge scan: {Count} badge event(s) currently active", activeSet.Count);
+        }
+
         var watchBased = new List<GlobalBadge>();
         foreach (var badge in badges
                      .GroupBy(b => b.SetId, StringComparer.OrdinalIgnoreCase)
                      .Select(group => group.First()))
         {
+            if (activeSet is not null && !activeSet.Contains(Normalize(badge.SetId)))
+            {
+                continue;
+            }
+
             if (!WatchRx.IsMatch(badge.Description) || EarnRx.IsMatch(badge.Description))
             {
                 continue;
@@ -197,6 +224,15 @@ public static class BadgeScanner
                     }
                 }
 
+                var channels = known?.Channels ?? new List<string>();
+                foreach (var channelHint in ExtractChannelHints(badge))
+                {
+                    if (!channels.Contains(channelHint, StringComparer.OrdinalIgnoreCase))
+                    {
+                        channels.Add(channelHint);
+                    }
+                }
+
                 Cache[badge.SetId] = new BadgeState
                 {
                     Campaign = campaign,
@@ -204,7 +240,8 @@ public static class BadgeScanner
                     Attempts = attempts,
                     NextAttemptUtc = DateTime.UtcNow.AddSeconds(backoffSeconds),
                     Title = badge.Title,
-                    Slugs = slugs
+                    Slugs = slugs,
+                    Channels = channels
                 };
             }
 
@@ -733,6 +770,13 @@ public static class BadgeScanner
             names.Add(contentMatch.Groups[1].Value.Trim());
         }
 
+        var duringMatch = Regex.Match(
+            description, @"(?:watch(?:ing)?|supporting) (?:a |an |the )?(.+?) during", RegexOptions.IgnoreCase);
+        if (duringMatch.Success)
+        {
+            names.Add(duringMatch.Groups[1].Value.Trim());
+        }
+
         var bareMatch = Regex.Match(
             description, @"(?:watching|supporting) (.+?)(?:[.!?]|$)", RegexOptions.IgnoreCase);
         if (bareMatch.Success)
@@ -831,9 +875,76 @@ public static class BadgeScanner
     public static string Normalize(string value) =>
         new(value.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
 
-    public static BlindWatchCandidate? GetBlindWatchCandidate(
+    private static async Task<List<EventBadge>?> FetchEventBadgesAsync()
+    {
+        lock (CacheGate)
+        {
+            if (_eventBadges is not null && DateTime.UtcNow < _eventsNextFetchUtc)
+            {
+                return _eventBadges;
+            }
+        }
+
+        try
+        {
+            using var response = await EventHttp.GetAsync("https://api.catquery.com/eventBadges");
+            response.EnsureSuccessStatusCode();
+            await using var stream = await response.Content.ReadAsStreamAsync();
+            using var document = await JsonDocument.ParseAsync(stream);
+
+            var badges = new List<EventBadge>();
+            foreach (var element in document.RootElement.GetProperty("badges").EnumerateArray())
+            {
+                var setId = GetString(element, "id");
+                var endAt = GetDateTime(element, "endAt");
+                if (setId is null || endAt == default)
+                {
+                    continue;
+                }
+
+                badges.Add(new EventBadge(setId, GetString(element, "name") ?? setId,
+                    GetDateTime(element, "startAt"), endAt));
+            }
+
+            lock (CacheGate)
+            {
+                _eventBadges = badges;
+                _eventsNextFetchUtc = DateTime.UtcNow + EventFetchInterval;
+            }
+        }
+        catch
+        {
+            lock (CacheGate)
+            {
+                _eventsNextFetchUtc = DateTime.UtcNow + EventRetryInterval;
+            }
+        }
+
+        lock (CacheGate)
+        {
+            return _eventBadges;
+        }
+    }
+
+    public static async Task<BlindWatchCandidate?> GetBlindWatchCandidateAsync(
         string login, HashSet<string> ownedSetIds, HashSet<string> busyNames)
     {
+        var events = await FetchEventBadgesAsync();
+        if (events is null)
+        {
+            return null;
+        }
+
+        var now = DateTime.UtcNow;
+        var endAtById = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        foreach (var badgeEvent in events)
+        {
+            if (badgeEvent.StartAt <= now && badgeEvent.EndAt > now)
+            {
+                endAtById[Normalize(badgeEvent.SetId)] = badgeEvent.EndAt;
+            }
+        }
+
         lock (CacheGate)
         {
             if (!BlindWatchState.TryGetValue(login, out var accountState))
@@ -842,16 +953,22 @@ public static class BadgeScanner
                 BlindWatchState[login] = accountState;
             }
 
-            var now = DateTime.UtcNow;
+            var due = new List<(BlindWatchCandidate Candidate, DateTime EndAt)>();
 
             foreach (var (setId, state) in Cache)
             {
-                if (state.Campaign is not null || state.NotWatchable || state.Slugs.Count == 0)
+                var normalized = Normalize(setId);
+                if (!endAtById.TryGetValue(normalized, out var endAt))
                 {
                     continue;
                 }
 
-                var normalized = Normalize(setId);
+                if (state.Campaign is not null || state.NotWatchable
+                    || (state.Slugs.Count == 0 && state.Channels.Count == 0))
+                {
+                    continue;
+                }
+
                 if (ownedSetIds.Contains(normalized) || busyNames.Contains(normalized))
                 {
                     continue;
@@ -862,10 +979,12 @@ public static class BadgeScanner
                     continue;
                 }
 
-                return new BlindWatchCandidate(setId, state.Title ?? setId, state.Slugs[0]);
+                due.Add((new BlindWatchCandidate(
+                    setId, state.Title ?? setId, state.Slugs.FirstOrDefault() ?? "",
+                    state.Channels.FirstOrDefault()), endAt));
             }
 
-            return null;
+            return due.OrderBy(x => x.EndAt).Select(x => x.Candidate).FirstOrDefault();
         }
     }
 

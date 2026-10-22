@@ -10,5 +10,5 @@ public partial class DropCampaign
 
     public BlindWatchInfo? BlindWatch { get; set; }
 
-    public sealed record BlindWatchInfo(string SetId, string Title, string Slug, int Minutes);
+    public sealed record BlindWatchInfo(string SetId, string Title, string Target, int Minutes);
 }
